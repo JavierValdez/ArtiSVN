@@ -2,10 +2,11 @@ import { Buffer } from 'node:buffer'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+// Keep this legacy endpoint stable: previously installed JaviSVN bridges connect here.
+// Runtime path must be \\.\pipe\javisvn-agent-broker; over-escaping breaks listen() on Windows.
 const BROKER_NAME = 'javisvn-agent-broker'
 const MAX_UNIX_SOCKET_PATH_BYTES = 100
 
-// Runtime path must be \\.\pipe\javisvn-agent-broker; over-escaping breaks listen() on Windows.
 export const WINDOWS_AGENT_BROKER_ENDPOINT = String.raw`\\.\pipe\javisvn-agent-broker`
 
 export function resolveAgentBrokerEndpoint(input: {

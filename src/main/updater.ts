@@ -4,6 +4,12 @@ import path from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
+import {
+  compareVersions,
+  fetchLatestRelease as fetchLatestReleaseFromSource,
+  normalizeVersion,
+  type UpdateDownloadAsset
+} from './services/app-update-source'
 
 type UpdateStage =
   | 'idle'
@@ -35,36 +41,10 @@ export interface AppUpdateState {
   error: string | null
 }
 
-interface UpdateDownloadAsset {
-  name: string
-  url: string
-  size: number | null
-}
-
-interface ReleaseMetadata {
-  version: string
-  releaseDate: string | null
-  files: UpdateDownloadAsset[]
-}
-
-interface LatestReleaseInfo {
-  version: string
-  name: string
-  releaseDate: string | null
-  releaseNotes: string | null
-  downloadAsset: UpdateDownloadAsset | null
-}
-
 let updaterInitialized = false
 let checkInFlight: Promise<void> | null = null
 let downloadInFlight: Promise<AppUpdateState> | null = null
 let latestDownloadAsset: UpdateDownloadAsset | null = null
-
-const RELEASES_BASE_URL = (
-  process.env.JAVISVN_RELEASES_BASE_URL ||
-  'https://storage.googleapis.com/artictools-releases/javisvn/releases'
-).replace(/\/+$/, '')
-const RELEASES_PAGE = RELEASES_BASE_URL
 
 const updateState: AppUpdateState = {
   stage: 'idle',
@@ -123,130 +103,9 @@ function markUnsupported(reason: string): void {
   })
 }
 
-function normalizeVersion(raw: string): string {
-  return raw.trim().replace(/^v/i, '')
-}
-
-function parseVersion(raw: string): { parts: number[]; preRelease: boolean } {
-  const normalized = normalizeVersion(raw)
-  const [stablePart, pre] = normalized.split('-', 2)
-  const parts = stablePart
-    .split('.')
-    .map((segment) => Number.parseInt(segment, 10))
-    .map((n) => (Number.isFinite(n) ? n : 0))
-  return { parts, preRelease: Boolean(pre) }
-}
-
-function compareVersions(a: string, b: string): number {
-  const av = parseVersion(a)
-  const bv = parseVersion(b)
-  const max = Math.max(av.parts.length, bv.parts.length)
-
-  for (let i = 0; i < max; i += 1) {
-    const ai = av.parts[i] ?? 0
-    const bi = bv.parts[i] ?? 0
-    if (ai > bi) return 1
-    if (ai < bi) return -1
-  }
-
-  if (av.preRelease && !bv.preRelease) return -1
-  if (!av.preRelease && bv.preRelease) return 1
-  return 0
-}
-
-function parseYamlValue(raw: string): string {
-  const value = raw.trim()
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-    return value.slice(1, -1)
-  }
-  return value
-}
-
-function resolveReleaseUrl(value: string): string {
-  const assetPath = parseYamlValue(value)
-  if (/^https?:\/\//i.test(assetPath)) return assetPath
-  return `${RELEASES_BASE_URL}/${assetPath.replace(/^\/+/, '')}`
-}
-
-function getReleaseAssetName(value: string): string {
-  const assetPath = parseYamlValue(value).split('?')[0]
-  try {
-    const parsed = new URL(assetPath)
-    return path.basename(decodeURIComponent(parsed.pathname))
-  } catch {
-    return path.basename(assetPath)
-  }
-}
-
-function parseReleaseMetadata(raw: string): ReleaseMetadata {
-  const versionMatch = raw.match(/^version:\s*(.+)$/m)
-  if (!versionMatch) {
-    throw new Error('Metadata de actualización inválida: falta version.')
-  }
-
-  const releaseDateMatch = raw.match(/^releaseDate:\s*(.+)$/m)
-  const files: UpdateDownloadAsset[] = []
-  let currentFile: UpdateDownloadAsset | null = null
-
-  for (const line of raw.split(/\r?\n/)) {
-    const urlMatch = line.match(/^\s*(?:-\s*)?url:\s*(.+)$/)
-    if (urlMatch) {
-      const assetPath = parseYamlValue(urlMatch[1])
-      currentFile = {
-        name: getReleaseAssetName(assetPath),
-        url: resolveReleaseUrl(assetPath),
-        size: null
-      }
-      files.push(currentFile)
-      continue
-    }
-
-    const sizeMatch = line.match(/^\s*size:\s*(\d+)\s*$/)
-    if (sizeMatch && currentFile) {
-      currentFile.size = Number(sizeMatch[1])
-    }
-  }
-
-  const pathMatch = raw.match(/^path:\s*(.+)$/m)
-  if (files.length === 0 && pathMatch) {
-    const assetPath = parseYamlValue(pathMatch[1])
-    files.push({
-      name: getReleaseAssetName(assetPath),
-      url: resolveReleaseUrl(assetPath),
-      size: null
-    })
-  }
-
-  return {
-    version: parseYamlValue(versionMatch[1]),
-    releaseDate: releaseDateMatch ? parseYamlValue(releaseDateMatch[1]) : null,
-    files
-  }
-}
-
 function getMetadataFileName(): string | null {
   if (process.platform === 'darwin') return 'latest-mac.yml'
   if (process.platform === 'win32') return 'latest.yml'
-  return null
-}
-
-function pickDownloadAsset(release: ReleaseMetadata): UpdateDownloadAsset | null {
-  const assets = release.files
-  if (assets.length > 0) {
-    const platformPriority = process.platform === 'darwin'
-      ? ['.dmg', '.zip', '.pkg']
-      : process.platform === 'win32'
-        ? ['.exe', '.msi', '.zip']
-        : ['.AppImage', '.deb', '.rpm', '.tar.gz', '.zip']
-
-    for (const ext of platformPriority) {
-      const found = assets.find((a) => a.name.toLowerCase().endsWith(ext.toLowerCase()))
-      if (found) return found
-    }
-
-    return assets[0] ?? null
-  }
-
   return null
 }
 
@@ -325,34 +184,12 @@ async function revealDownloadedInstaller(): Promise<boolean> {
   return true
 }
 
-async function fetchLatestRelease(): Promise<LatestReleaseInfo> {
-  const metadataFileName = getMetadataFileName()
-  if (!metadataFileName) {
-    throw new Error('No hay actualizaciones configuradas para esta plataforma.')
-  }
-
-  const response = await fetch(`${RELEASES_BASE_URL}/${metadataFileName}`, {
-    headers: {
-      Accept: 'text/yaml,text/plain',
-      'User-Agent': `JaviSVN/${app.getVersion()}`
-    },
-    redirect: 'follow'
+async function fetchLatestRelease() {
+  const currentVersion = app.getVersion()
+  return fetchLatestReleaseFromSource({
+    currentVersion,
+    platform: process.platform
   })
-
-  if (!response.ok) {
-    throw new Error(`El bucket de releases respondió con estado ${response.status}.`)
-  }
-
-  const metadata = parseReleaseMetadata(await response.text())
-  const version = normalizeVersion(metadata.version)
-
-  return {
-    version,
-    name: `JaviSVN ${version}`,
-    releaseDate: metadata.releaseDate,
-    releaseNotes: null,
-    downloadAsset: pickDownloadAsset(metadata)
-  }
 }
 
 async function checkForUpdates(): Promise<AppUpdateState> {
@@ -387,7 +224,7 @@ async function checkForUpdates(): Promise<AppUpdateState> {
         releaseName: latest.name,
         releaseDate: latest.releaseDate,
         releaseNotes: latest.releaseNotes,
-        downloadUrl: RELEASES_PAGE,
+        downloadUrl: latest.releasePage,
         downloadFileName: null,
         downloadedInstallerPath: null,
         error: 'No se encontró un instalador compatible en el metadata de actualización.'
@@ -480,7 +317,7 @@ async function downloadUpdate(): Promise<AppUpdateState> {
       const response = await fetch(asset.url, {
         headers: {
           Accept: 'application/octet-stream',
-          'User-Agent': `JaviSVN/${app.getVersion()}`
+          'User-Agent': 'ArtiSVN'
         },
         redirect: 'follow'
       })

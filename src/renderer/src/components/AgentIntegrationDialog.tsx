@@ -18,7 +18,7 @@ function buildConfigText(config: AgentClientConfig | null): string {
   if (!config) return ''
   return JSON.stringify({
     mcpServers: {
-      javisvn: config
+      artisvn: config
     }
   }, null, 2)
 }

@@ -1,4 +1,4 @@
-import { dirname, join } from 'node:path'
+import { win32 } from 'node:path'
 
 export interface AgentClientLaunchConfig {
   command: string
@@ -16,7 +16,7 @@ export function buildAgentClientLaunchConfig(input: {
   comSpec?: string
   stdioEnvKey?: string
   // Windows-only: nombre del binario CONSOLE shipeado al lado del execPath
-  // (p.ej. "JaviSvnMcp.exe"). Cuando se pasa, en Windows se invoca este
+  // (p.ej. "ArtiSvnMcp.exe"). Cuando se pasa, en Windows se invoca este
   // binario en lugar del exe Electron GUI principal. En macOS no se usa.
   mcpBridgeExeName?: string
   // Override para tests: ruta absoluta al binario bridge.
@@ -51,7 +51,7 @@ export function buildAgentClientLaunchConfig(input: {
     // expone el broker). El binario GUI principal NO cambia.
     const bridgePath = input.mcpBridgeExePath
       ?? (input.mcpBridgeExeName
-        ? join(dirname(input.execPath), input.mcpBridgeExeName)
+        ? win32.join(win32.dirname(input.execPath), input.mcpBridgeExeName)
         : undefined)
     if (bridgePath) {
       return {
@@ -60,12 +60,13 @@ export function buildAgentClientLaunchConfig(input: {
       }
     }
 
-    // Preferencia 2 (fallback): lanzar el exe Electron directamente con env
-    // vars. Solo funciona en clientes MCP que no hereden ELECTRON_RUN_AS_NODE.
+    // Preferencia 2 (fallback): lanzar Electron con --mcp-stdio explícito.
+    // El argumento mantiene compatibilidad incluso si el entrypoint de una
+    // versión instalada todavía no reconoce ARTISVN_MCP_STDIO.
     if (input.stdioEnvKey) {
       return {
         command: input.execPath,
-        args: []
+        args: input.launchArgs
       }
     }
     // Legacy: sin stdioEnvKey, usar cmd.exe wrapper con --mcp-stdio.
@@ -97,5 +98,13 @@ export function buildAgentClientLaunchConfig(input: {
   return {
     command: input.execPath,
     args: input.launchArgs
+  }
+}
+
+export function buildAgentClientEnvironment(token: string): Record<string, string> {
+  return {
+    ARTISVN_MCP_TOKEN: token,
+    ARTISVN_MCP_STDIO: '1',
+    ELECTRON_RUN_AS_NODE: ''
   }
 }

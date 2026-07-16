@@ -49,7 +49,7 @@ export class AgentBrokerClient {
         reject(error)
       }
       const onError = (error: Error) => cleanupFailedConnect(error)
-      const onCloseBeforeReady = () => cleanupFailedConnect(new Error('Conexión con JaviSVN cerrada antes de autenticar'))
+      const onCloseBeforeReady = () => cleanupFailedConnect(new Error('Conexión con ArtiSVN cerrada antes de autenticar'))
       const onConnect = () => {
         socket.off('error', onError)
         socket.write(`${JSON.stringify({
@@ -69,7 +69,7 @@ export class AgentBrokerClient {
         const hello = JSON.parse(raw) as BrokerHelloResponse
         if (!hello.ok) {
           socket.destroy()
-          cleanupFailedConnect(new Error(hello.error || 'No se pudo autenticar con JaviSVN'))
+          cleanupFailedConnect(new Error(hello.error || 'No se pudo autenticar con ArtiSVN'))
           return
         }
 
@@ -140,7 +140,7 @@ export class AgentBrokerClient {
 
   private handleClose(socket: Socket): void {
     if (this.socket !== socket) return
-    for (const pending of this.pending.values()) pending.reject(new Error('Conexión con JaviSVN cerrada'))
+    for (const pending of this.pending.values()) pending.reject(new Error('Conexión con ArtiSVN cerrada'))
     this.pending.clear()
     this.socket = null
     this.connected = false

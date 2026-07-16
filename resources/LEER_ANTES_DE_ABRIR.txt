@@ -1,22 +1,30 @@
 ══════════════════════════════════════════
-  JaviSVN — Instrucciones de instalación
+  ArtiSVN — Instrucciones de instalación
 ══════════════════════════════════════════
 
-Si macOS dice "JaviSVN está dañado y no puede abrirse",
-debes ejecutar este comando en la Terminal:
+Si macOS dice “ArtiSVN está dañado y no puede abrirse”,
+ejecuta este comando en Terminal:
 
-  xattr -cr /Applications/JaviSVN.app
+  xattr -cr /Applications/ArtiSVN.app
 
-Cómo hacerlo paso a paso:
+Pasos:
 
-  1. Arrastra JaviSVN a la carpeta Aplicaciones (como siempre)
-  2. Abre la app Terminal
-       Finder → Aplicaciones → Utilidades → Terminal
-  3. Copia y pega este comando exactamente:
-       xattr -cr /Applications/JaviSVN.app
-  4. Presiona Enter
-  5. Abre JaviSVN normalmente
+  1. Arrastra ArtiSVN a la carpeta Aplicaciones.
+  2. Abre Finder → Aplicaciones → Utilidades → Terminal.
+  3. Copia y pega el comando anterior.
+  4. Presiona Enter y abre ArtiSVN normalmente.
 
 Solo necesitas hacerlo una vez tras cada instalación.
+
+Migración desde JaviSVN:
+
+  • ArtiSVN usa nuevas rutas de aplicación y datos.
+  • La aplicación conserva compatibilidad de migración con la
+    configuración y las working copies anteriores.
+  • Las integraciones MCP nuevas deben usar artisvn-mcp-bridge.
+    El alias javisvn-mcp-bridge es transitorio.
+
+Descargas oficiales:
+  https://github.com/JavierValdez/ArtiSVN/releases/latest
 
 ══════════════════════════════════════════

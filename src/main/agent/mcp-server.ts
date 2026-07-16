@@ -5,6 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { AgentBrokerClient } from './broker-client'
 import { getAgentBrokerEndpoint } from './integration'
+import { MCP_DISPLAY_NAME, MCP_ENV, MCP_SERVER_NAME, resolveMcpEnv } from './identity'
 import { registerResources, registerTools } from './mcp-surface'
 
 interface TrackedSpawn {
@@ -15,8 +16,8 @@ interface TrackedSpawn {
 const trackedSpawns = new Set<TrackedSpawn>()
 
 function logMcp(event: string): void {
-  if (process.env.JAVISVN_MCP_DEBUG !== '1') return
-  process.stderr.write(`[JaviSVN MCP] ${new Date().toISOString()} ${event}\n`)
+  if (resolveMcpEnv(process.env, MCP_ENV.debug, MCP_ENV.legacyDebug) !== '1') return
+  process.stderr.write(`[${MCP_DISPLAY_NAME} MCP] ${new Date().toISOString()} ${event}\n`)
 }
 
 function buildVisibleAppEnv(): Record<string, string | undefined> {
@@ -74,9 +75,9 @@ async function connectBroker(token: string): Promise<AgentBrokerClient> {
   const client = new AgentBrokerClient({
     endpoint: getAgentBrokerEndpoint(),
     token,
-    clientId: process.env.JAVISVN_MCP_CLIENT_ID || randomUUID(),
-    clientName: process.env.JAVISVN_MCP_CLIENT_NAME || 'MCP client',
-    clientVersion: process.env.JAVISVN_MCP_CLIENT_VERSION
+    clientId: resolveMcpEnv(process.env, MCP_ENV.clientId, MCP_ENV.legacyClientId) || randomUUID(),
+    clientName: resolveMcpEnv(process.env, MCP_ENV.clientName, MCP_ENV.legacyClientName) || 'MCP client',
+    clientVersion: resolveMcpEnv(process.env, MCP_ENV.clientVersion, MCP_ENV.legacyClientVersion)
   })
 
   try {
@@ -100,12 +101,12 @@ async function connectBroker(token: string): Promise<AgentBrokerClient> {
       // wait until visible app starts broker
     }
   }
-  throw new Error('No se pudo conectar con JaviSVN. Abre la app y habilita la integración IA.')
+  throw new Error(`No se pudo conectar con ${MCP_DISPLAY_NAME}. Abre la app y habilita la integración IA.`)
 }
 
 export async function runMcpServerMode(): Promise<void> {
-  const token = process.env.JAVISVN_MCP_TOKEN
-  if (!token) throw new Error('Falta JAVISVN_MCP_TOKEN para autenticar el MCP de JaviSVN.')
+  const token = resolveMcpEnv(process.env, MCP_ENV.token, MCP_ENV.legacyToken)
+  if (!token) throw new Error(`Falta ${MCP_ENV.token} para autenticar el MCP de ${MCP_DISPLAY_NAME}.`)
 
   await app.whenReady()
 
@@ -162,7 +163,7 @@ export async function runMcpServerMode(): Promise<void> {
   // ── Conexión y registro normales ───────────────────────────────────
   try {
     broker = await connectBroker(token)
-    server = new McpServer({ name: 'javisvn', version: app.getVersion() })
+    server = new McpServer({ name: MCP_SERVER_NAME, version: app.getVersion() })
     registerTools(server, broker)
     registerResources(server, broker)
 

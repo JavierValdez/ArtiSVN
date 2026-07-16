@@ -1,6 +1,38 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { buildAgentClientLaunchConfig } from '../src/main/agent/client-config'
+import { buildAgentClientEnvironment, buildAgentClientLaunchConfig } from '../src/main/agent/client-config'
+
+test('new client config emits canonical ArtiSVN environment keys only', () => {
+  const env = buildAgentClientEnvironment('test-token')
+  assert.deepEqual(env, {
+    ARTISVN_MCP_TOKEN: 'test-token',
+    ARTISVN_MCP_STDIO: '1',
+    ELECTRON_RUN_AS_NODE: ''
+  })
+  assert.equal('JAVISVN_MCP_TOKEN' in env, false)
+})
+
+test('client config launches the canonical standalone bridge names', () => {
+  assert.deepEqual(buildAgentClientLaunchConfig({
+    platform: 'darwin',
+    execPath: '/Applications/ArtiSVN.app/Contents/MacOS/ArtiSVN',
+    launchArgs: ['--mcp-stdio'],
+    mcpBridgeExePath: '/Applications/ArtiSVN.app/Contents/Resources/bridge/artisvn-mcp-bridge'
+  }), {
+    command: '/Applications/ArtiSVN.app/Contents/Resources/bridge/artisvn-mcp-bridge',
+    args: []
+  })
+
+  assert.deepEqual(buildAgentClientLaunchConfig({
+    platform: 'win32',
+    execPath: 'C:\\Program Files\\ArtiSVN\\ArtiSVN.exe',
+    launchArgs: ['--mcp-stdio'],
+    mcpBridgeExeName: 'ArtiSvnMcp.exe'
+  }), {
+    command: 'C:\\Program Files\\ArtiSVN\\ArtiSvnMcp.exe',
+    args: []
+  })
+})
 
 test('client config clears ELECTRON_RUN_AS_NODE on macOS', () => {
   assert.deepEqual(buildAgentClientLaunchConfig({

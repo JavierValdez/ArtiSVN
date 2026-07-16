@@ -58,6 +58,12 @@ import {
   stopAgentBroker
 } from './agent/integration'
 import { runMcpServerMode } from './agent/mcp-server'
+import { MCP_ENV, resolveMcpEnv } from './agent/identity'
+import {
+  inspectAppMigration,
+  runAppMigrationAction,
+  type MigrationAction
+} from './services/app-migration'
 
 const _require = createRequire(import.meta.url)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -65,10 +71,27 @@ const xml2js = _require('xml2js') as any
 const parseStringPromise = xml2js.parseStringPromise
 
 const isDev = process.env.NODE_ENV === 'development'
-const isMcpStdioMode = process.argv.includes('--mcp-stdio') || process.env.JAVISVN_MCP_STDIO === '1' || !!process.env.JAVISVN_MCP_TOKEN;
+const mcpStdioValue = resolveMcpEnv(process.env, MCP_ENV.stdio, MCP_ENV.legacyStdio)
+const mcpTokenValue = resolveMcpEnv(process.env, MCP_ENV.token, MCP_ENV.legacyToken)
+const isMcpStdioMode = process.argv.includes('--mcp-stdio')
+  || mcpStdioValue === '1'
+  || Boolean(mcpTokenValue)
 
-// Set app name before ready so it shows correctly in the dock and menu bar
-app.name = 'JaviSVN'
+// Set app name before ready so it shows correctly in the dock and menu bar.
+app.name = 'ArtiSVN'
+
+function getAppMigrationOptions() {
+  return {
+    appDataPath: app.getPath('appData'),
+    documentsPath: dirname(BASE_REPO_PATH),
+  }
+}
+
+async function startAgentBrokerWhenMigrationResolved(): Promise<void> {
+  if (!inspectAppMigration(getAppMigrationOptions()).needed) {
+    await startAgentBrokerIfEnabled()
+  }
+}
 
 if (isMcpStdioMode) {
   app.disableHardwareAcceleration()
@@ -107,6 +130,12 @@ function readUtf8IfExists(path: string): string {
   }
 }
 
+function isRepositoryPath(pathValue: string): boolean {
+  const relativePath = relative(resolve(BASE_REPO_PATH), resolve(pathValue))
+  if (!relativePath || isAbsolute(relativePath)) return false
+  return relativePath.split(/[\\/]/)[0] !== '..'
+}
+
 function resolveRepoRelativeTarget(repoPath: string, filePath: string): {
   repoAbs: string
   targetAbs: string
@@ -116,7 +145,7 @@ function resolveRepoRelativeTarget(repoPath: string, filePath: string): {
   const targetAbs = resolve(repoPath, filePath)
   const relativePath = relative(repoAbs, targetAbs)
 
-  if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+  if (relativePath.split(/[\\/]/)[0] === '..' || isAbsolute(relativePath)) {
     throw new Error('Ruta fuera del repositorio')
   }
 
@@ -322,7 +351,7 @@ async function exportRemotePreviewFile(url: string, suggestedName?: string): Pro
 
   const fallbackName = basename(safeUrl.replace(/\/+$/g, '')) || 'preview.bin'
   const safeName = sanitizePreviewFileName(suggestedName || fallbackName)
-  const previewDir = mkdtempSync(join(tmpdir(), 'javisvn-preview-'))
+  const previewDir = mkdtempSync(join(tmpdir(), 'artisvn-preview-'))
   previewTempDirs.push(previewDir)
   const targetPath = join(previewDir, safeName)
 
@@ -645,7 +674,7 @@ function setupApplicationMenu(): void {
 
 app.whenReady().then(() => {
   if (isMcpStdioMode) return
-  if (process.platform === 'win32') app.setAppUserModelId('com.javisvn.app')
+  if (process.platform === 'win32') app.setAppUserModelId('com.artisvn.app')
 
   // Set dock icon in dev mode (in production the .icns in the bundle is used automatically)
   if (isDev && process.platform === 'darwin' && app.dock) {
@@ -655,7 +684,7 @@ app.whenReady().then(() => {
 
   setupApplicationMenu()
   setupDockMenu()
-  void startAgentBrokerIfEnabled()
+  void startAgentBrokerWhenMigrationResolved()
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -664,7 +693,7 @@ app.whenReady().then(() => {
 
 if (isMcpStdioMode) {
   void runMcpServerMode().catch((error) => {
-    process.stderr.write(`${error instanceof Error ? error.message : 'No se pudo iniciar el MCP de JaviSVN'}\n`)
+    process.stderr.write(`${error instanceof Error ? error.message : 'No se pudo iniciar el MCP de ArtiSVN'}\n`)
     app.exit(1)
   })
 }
@@ -678,6 +707,20 @@ app.on('window-all-closed', () => {
 app.on('will-quit', () => {
   cleanupPreviewTempDirs()
   void stopAgentBroker()
+})
+
+ipcMain.handle('appMigration:inspect', () => {
+  return inspectAppMigration(getAppMigrationOptions())
+})
+
+ipcMain.handle('appMigration:runAction', async (_event, action: MigrationAction) => {
+  if (action !== 'migrate-now' && action !== 'remind-later' && action !== 'start-without-migration') {
+    throw new Error('Acción de migración no soportada')
+  }
+
+  const result = runAppMigrationAction(action, getAppMigrationOptions())
+  await startAgentBrokerWhenMigrationResolved()
+  return result
 })
 
 ipcMain.handle('app:newWindow', async (event) => {
@@ -808,7 +851,7 @@ ipcMain.handle('repos:list', async () => {
 ipcMain.handle('repos:basePath', () => BASE_REPO_PATH)
 
 ipcMain.handle('repos:delete', async (_e, repoPath: string) => {
-  if (!repoPath.startsWith(BASE_REPO_PATH)) {
+  if (!isRepositoryPath(repoPath)) {
     throw new Error('Ruta de repositorio fuera del directorio permitido')
   }
   if (!existsSync(repoPath)) throw new Error('El repositorio no existe')
@@ -860,7 +903,7 @@ ipcMain.handle('svn:remoteCreateFile', async (_e, parentUrl: string, name: strin
   const targetUrl = buildRemoteUrl(parentUrl, name)
   const msg = (message || '').trim() || `Crear archivo ${name.trim()}`
 
-  const tempDir = mkdtempSync(join(tmpdir(), 'javisvn-'))
+  const tempDir = mkdtempSync(join(tmpdir(), 'artisvn-'))
   const tempFile = join(tempDir, name.trim())
   writeFileSync(tempFile, content, 'utf-8')
 
@@ -1355,7 +1398,7 @@ ipcMain.handle('dialog:listEditors', async () => {
 ipcMain.handle('dialog:openInEditor', async (_e, editorId: string, repoPath: string) => {
   const safeEditorId = (editorId || '').trim()
   const safeRepoPath = (repoPath || '').trim()
-  if (!safeRepoPath.startsWith(BASE_REPO_PATH)) {
+  if (!isRepositoryPath(safeRepoPath)) {
     throw new Error('Ruta de repositorio fuera del directorio permitido')
   }
   if (safeEditorId !== 'vscode' && safeEditorId !== 'vscode-insiders') {
@@ -1409,7 +1452,7 @@ ipcMain.handle('svn:version', async () => {
 ipcMain.handle('svn:install', async (event) => {
   const targetWindow = getEventWindow(event)
   if (process.platform === 'win32') {
-    throw new Error('En Windows, JaviSVN incluye SVN integrado. Si hay problemas, descarga TortoiseSVN desde https://tortoisesvn.net')
+    throw new Error('En Windows, ArtiSVN incluye SVN integrado. Si hay problemas, descarga TortoiseSVN desde https://tortoisesvn.net')
   }
 
   return new Promise((resolve, reject) => {

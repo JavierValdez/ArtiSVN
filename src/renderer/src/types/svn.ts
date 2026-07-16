@@ -1,3 +1,32 @@
+export type MigrationAction = 'migrate-now' | 'remind-later' | 'start-without-migration'
+export type MigrationStatus = 'pending' | 'in-progress' | 'completed' | 'blocked' | 'failed' | 'skipped'
+export type MigrationItemStatus = 'pending' | 'copying' | 'completed' | 'not-found' | 'conflict' | 'failed'
+
+export interface MigrationInspection {
+  needed: boolean
+  legacyConfigFound: boolean
+  legacyReposFound: boolean
+  canonicalConfigFound: boolean
+  canonicalReposFound: boolean
+  journalStatus: MigrationStatus | null
+  journalValid: boolean
+}
+
+export interface MigrationConflict {
+  area: 'journal' | 'config' | 'working-copy'
+  code: string
+  item?: string
+}
+
+export interface MigrationResult {
+  action: MigrationAction
+  status: MigrationStatus
+  configStatus: MigrationItemStatus
+  workingCopies: Record<string, MigrationItemStatus>
+  conflicts: MigrationConflict[]
+  errorCode?: string
+}
+
 export interface Credentials {
   username: string
   /**

@@ -1,6 +1,6 @@
 {
-  "name": "javisvn",
-  "version": "2.1.6",
+  "name": "artisvn",
+  "version": "2.2.0",
   "description": "SVN Desktop Client - Cliente SVN estilo GitHub Desktop",
   "type": "module",
   "main": "./out/main/index.js",
@@ -44,8 +44,8 @@
     "vite": "^5.3.0"
   },
   "build": {
-    "appId": "com.javisvn.app",
-    "productName": "JaviSVN",
+    "appId": "com.artisvn.app",
+    "productName": "ArtiSVN",
     "mac": {
       "target": "dmg",
       "icon": "resources/icon.icns",
@@ -54,6 +54,10 @@
         {
           "from": "dist-mcp-bridge/bridge.cjs",
           "to": "bridge/bridge.cjs"
+        },
+        {
+          "from": "dist-mcp-bridge/artisvn-mcp-bridge",
+          "to": "bridge/artisvn-mcp-bridge"
         },
         {
           "from": "dist-mcp-bridge/javisvn-mcp-bridge",
@@ -66,6 +70,10 @@
       "icon": "resources/icon.ico",
       "artifactName": "${productName}-Windows-${version}-Setup.${ext}",
       "extraFiles": [
+        {
+          "from": "dist-mcp-bridge/ArtiSvnMcp.exe",
+          "to": "ArtiSvnMcp.exe"
+        },
         {
           "from": "dist-mcp-bridge/JaviSvnMcp.exe",
           "to": "JaviSvnMcp.exe"
@@ -129,7 +137,7 @@
     "publish": [
       {
         "provider": "generic",
-        "url": "https://storage.googleapis.com/artictools-releases/javisvn/releases"
+        "url": "https://storage.googleapis.com/artictools-releases/artisvn/releases"
       }
     ]
   }

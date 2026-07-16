@@ -10,20 +10,18 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { AgentBrokerClient } from '../../src/main/agent/broker-client'
 import { resolveAgentBrokerEndpoint } from '../../src/main/agent/endpoint'
+import { MCP_DISPLAY_NAME, MCP_ENV, MCP_SERVER_NAME, resolveMcpEnv } from '../../src/main/agent/identity'
 import { registerResources, registerTools } from '../../src/main/agent/mcp-surface'
 
-const SERVER_NAME = 'javisvn'
-const TOKEN_ENV = 'JAVISVN_MCP_TOKEN'
-const DEBUG_ENV = 'JAVISVN_MCP_DEBUG'
-const VERSION = process.env.JAVISVN_BRIDGE_VERSION || '0.0.0'
+const VERSION = process.env.ARTISVN_BRIDGE_VERSION ?? process.env.JAVISVN_BRIDGE_VERSION ?? '0.0.0'
 
 function resolveBrokerEndpoint(): string {
   if (process.platform === 'win32') {
     return resolveAgentBrokerEndpoint({ platform: process.platform, userDataPath: '' })
   }
   const userData = process.platform === 'darwin'
-    ? path.join(os.homedir(), 'Library', 'Application Support', 'javisvn')
-    : path.join(process.env.XDG_DATA_HOME ?? path.join(os.homedir(), '.local', 'share'), 'javisvn')
+    ? path.join(os.homedir(), 'Library', 'Application Support', 'artisvn')
+    : path.join(process.env.XDG_DATA_HOME ?? path.join(os.homedir(), '.local', 'share'), 'artisvn')
   return resolveAgentBrokerEndpoint({
     platform: process.platform,
     userDataPath: userData,
@@ -34,17 +32,17 @@ function resolveBrokerEndpoint(): string {
 const PIPE_ENDPOINT = resolveBrokerEndpoint()
 
 function logDebug(message: string): void {
-  if (process.env[DEBUG_ENV] !== '1') return
-  process.stderr.write(`[JaviSVN MCP bridge] ${new Date().toISOString()} ${message}\n`)
+  if (resolveMcpEnv(process.env, MCP_ENV.debug, MCP_ENV.legacyDebug) !== '1') return
+  process.stderr.write(`[${MCP_DISPLAY_NAME} MCP bridge] ${new Date().toISOString()} ${message}\n`)
 }
 
 async function connectBroker(token: string): Promise<AgentBrokerClient> {
   const client = new AgentBrokerClient({
     endpoint: PIPE_ENDPOINT,
     token,
-    clientId: process.env.JAVISVN_MCP_CLIENT_ID || randomUUID(),
-    clientName: process.env.JAVISVN_MCP_CLIENT_NAME || 'MCP client',
-    clientVersion: process.env.JAVISVN_MCP_CLIENT_VERSION
+    clientId: resolveMcpEnv(process.env, MCP_ENV.clientId, MCP_ENV.legacyClientId) || randomUUID(),
+    clientName: resolveMcpEnv(process.env, MCP_ENV.clientName, MCP_ENV.legacyClientName) || 'MCP client',
+    clientVersion: resolveMcpEnv(process.env, MCP_ENV.clientVersion, MCP_ENV.legacyClientVersion)
   })
 
   // Reintenta varias veces por si la app GUI todavía está arrancando el broker.
@@ -62,19 +60,19 @@ async function connectBroker(token: string): Promise<AgentBrokerClient> {
   }
 
   throw lastError ?? new Error(
-    `No se pudo conectar al broker de ${SERVER_NAME}. Asegurate de que la app GUI esta abierta y la integracion IA esta habilitada.`
+    `No se pudo conectar al broker de ${MCP_DISPLAY_NAME}. Asegurate de que la app GUI esta abierta y la integracion IA esta habilitada.`
   )
 }
 
 async function main(): Promise<void> {
-  const token = process.env[TOKEN_ENV]
+  const token = resolveMcpEnv(process.env, MCP_ENV.token, MCP_ENV.legacyToken)
   if (!token) {
-    process.stderr.write(`Falta ${TOKEN_ENV} para autenticar el MCP de ${SERVER_NAME}.\n`)
+    process.stderr.write(`Falta ${MCP_ENV.token} para autenticar el MCP de ${MCP_DISPLAY_NAME}.\n`)
     process.exit(1)
   }
 
   const broker = await connectBroker(token)
-  const server = new McpServer({ name: SERVER_NAME, version: VERSION })
+  const server = new McpServer({ name: MCP_SERVER_NAME, version: VERSION })
   registerTools(server, broker)
   registerResources(server, broker)
 

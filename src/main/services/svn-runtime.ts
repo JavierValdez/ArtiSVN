@@ -77,7 +77,10 @@ function findSvnBin(preferred?: string): string {
   const fallback = `svn${ext}`
   const bundledPackaged = join(process.resourcesPath || '', 'bin', `svn${ext}`)
   const bundledDev = join(__dirname, `../../../resources/bin/svn${ext}`)
-  const preferredValues = [preferred || '', process.env.JAVISVN_SVN_BIN || '']
+  const preferredValues = [
+    preferred || '',
+    process.env.ARTISVN_SVN_BIN || process.env.JAVISVN_SVN_BIN || ''
+  ]
 
   const candidates = app.isPackaged
     ? uniqueStrings([
@@ -151,7 +154,7 @@ function getSvnAuthArgs(): string[] {
   return args
 }
 
-const LEGACY_OPENSSL_CONF_NAME = 'javisvn-openssl-legacy.cnf'
+const LEGACY_OPENSSL_CONF_NAME = 'artisvn-openssl-legacy.cnf'
 const LEGACY_OPENSSL_CONF = `openssl_conf = default_conf
 
 [default_conf]

@@ -1,7 +1,8 @@
 import { app, safeStorage } from 'electron'
-import { readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { generateAgentToken } from '../agent/token'
+import { resolveLocalPaths } from './local-paths'
 
 export interface StoredCredentials {
   username: string
@@ -27,19 +28,36 @@ interface StoredAgentIntegration {
 }
 
 export function getStorePath(): string {
-  return join(app.getPath('userData'), 'javisvn-config.json')
+  return resolveLocalPaths({
+    appDataPath: app.getPath('appData')
+  }).configFile
 }
 
 function readStore(): Record<string, unknown> {
   try {
     return JSON.parse(readFileSync(getStorePath(), 'utf-8')) as Record<string, unknown>
-  } catch {
-    return {}
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return {}
+    throw new Error('No se pudo leer la configuración de ArtiSVN sin riesgo de pérdida de datos.', {
+      cause: error
+    })
   }
 }
 
 function writeStore(data: Record<string, unknown>): void {
-  writeFileSync(getStorePath(), JSON.stringify(data, null, 2), 'utf-8')
+  const storePath = getStorePath()
+  const temporaryPath = `${storePath}.${process.pid}.${Date.now()}.tmp`
+  mkdirSync(dirname(storePath), { recursive: true })
+  writeFileSync(temporaryPath, `${JSON.stringify(data, null, 2)}\n`, {
+    encoding: 'utf-8',
+    mode: 0o600
+  })
+  try {
+    renameSync(temporaryPath, storePath)
+  } catch (error) {
+    rmSync(temporaryPath, { force: true })
+    throw error
+  }
 }
 
 export function storeGet<T = unknown>(key: string): T | undefined {
@@ -110,22 +128,25 @@ export function getCurrentServerUrl(defaultValue = ''): string {
   return creds?.serverUrl || String(storeGet('serverUrl') || defaultValue)
 }
 
+function updateStoredCredentialsServerUrl(serverUrl: string): void {
+  const stored = storeGet<Record<string, unknown>>('credentials')
+  if (!stored || typeof stored !== 'object') return
+
+  // Preserve the encrypted representation exactly as stored. Reading/decrypting and
+  // spreading credentials here would write the password back as plaintext.
+  storeSet('credentials', { ...stored, serverUrl })
+}
+
 export function setCurrentServerUrl(url: string): void {
   const nextUrl = String(url || '').trim()
   if (!nextUrl) return
 
-  const creds = getStoredCredentials()
-  if (creds && (creds.username || creds.password)) {
-    storeSet('credentials', { ...creds, serverUrl: nextUrl })
-  }
+  updateStoredCredentialsServerUrl(nextUrl)
   storeSet('serverUrl', nextUrl)
 }
 
 export function clearCurrentServerUrl(): void {
-  const creds = getStoredCredentials()
-  if (creds) {
-    storeSet('credentials', { ...creds, serverUrl: '' })
-  }
+  updateStoredCredentialsServerUrl('')
   storeSet('serverUrl', '')
 }
 

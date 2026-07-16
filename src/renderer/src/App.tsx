@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type CSSProperties } from 'react'
-import { ActiveTab, AgentActivityEntry, AgentClientConfig, AgentIntegrationState, BlameLine, ConflictAccept, ConflictContent, Credentials, EditorId, EditorOption, FileChange, LocalRepo, RemoteServer } from './types/svn'
+import { ActiveTab, AgentActivityEntry, AgentClientConfig, AgentIntegrationState, BlameLine, ConflictAccept, ConflictContent, Credentials, EditorId, EditorOption, FileChange, LocalRepo, MigrationAction, MigrationInspection, MigrationResult, RemoteServer } from './types/svn'
 import Sidebar from './components/Sidebar'
 import ChangesView from './components/ChangesView'
 import ExplorerView from './components/ExplorerView'
@@ -98,6 +98,10 @@ declare global {
       downloadUpdate: () => Promise<AppUpdateState>
       onAppUpdateState: (cb: (state: AppUpdateState) => void) => () => void
     }
+    appMigration: {
+      inspect: () => Promise<MigrationInspection>
+      runAction: (action: MigrationAction) => Promise<MigrationResult>
+    }
     appUpdate: {
       getState: () => Promise<AppUpdateState>
       check: () => Promise<AppUpdateState>
@@ -128,7 +132,7 @@ function getAppUpdateBannerText(state: AppUpdateState): string {
   }
 
   if (state.stage === 'downloaded') {
-    return `Instalador listo en Descargas: ${state.downloadFileName || `JaviSVN ${state.downloadedVersion || state.latestVersion || ''}`}`
+    return `Instalador listo en Descargas: ${state.downloadFileName || `ArtiSVN ${state.downloadedVersion || state.latestVersion || ''}`}`
   }
 
   return `Nueva versión ${state.latestVersion} disponible`
@@ -148,6 +152,12 @@ function buildChangesSignature(changes: FileChange[]): string {
 }
 
 export default function App() {
+  const [migrationGateReady, setMigrationGateReady] = useState(false)
+  const [migrationInspection, setMigrationInspection] = useState<MigrationInspection | null>(null)
+  const [showMigrationDialog, setShowMigrationDialog] = useState(false)
+  const [migrationRunning, setMigrationRunning] = useState(false)
+  const [migrationResult, setMigrationResult] = useState<MigrationResult | null>(null)
+  const [migrationError, setMigrationError] = useState<string | null>(null)
   const [credentials, setCredentials] = useState<Credentials | null>(null)
   const [showAuthDialog, setShowAuthDialog] = useState(false)
   const [authInitialServerUrl, setAuthInitialServerUrl] = useState(DEFAULT_SERVER_URL)
@@ -204,8 +214,33 @@ export default function App() {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3500)
   }, [])
 
-  // Init
+  // Migration is inspected before normal initialization so legacy data is not
+  // read or mutated until the user has made an explicit choice.
   useEffect(() => {
+    let active = true
+    window.appMigration.inspect()
+      .then((inspection) => {
+        if (!active) return
+        setMigrationInspection(inspection)
+        if (inspection.needed) {
+          setShowMigrationDialog(true)
+        } else {
+          setMigrationGateReady(true)
+        }
+      })
+      .catch(() => {
+        if (!active) return
+        setMigrationError('No se pudo comprobar el estado de migración.')
+        setShowMigrationDialog(true)
+      })
+    return () => { active = false }
+  }, [])
+
+  // Normal app initialization starts only after migration is unnecessary or the
+  // user has chosen an action. It is allowed to continue behind a result dialog.
+  useEffect(() => {
+    if (!migrationGateReady) return
+
     const init = async () => {
       try {
         const serverUrl = await window.svn.getServerUrl()
@@ -249,7 +284,7 @@ export default function App() {
 
     const unsubUpdate = window.svn.onAppUpdateState?.((state) => setAppUpdateState(state))
     return () => { unsubUpdate?.() }
-  }, [toast])
+  }, [migrationGateReady, toast])
 
   const loadChanges = async (options: { silent?: boolean } = {}) => {
     const repoPath = selectedRepoPathRef.current
@@ -595,8 +630,96 @@ export default function App() {
     }
   }
 
+  const handleMigrationAction = async (action: MigrationAction) => {
+    setMigrationRunning(true)
+    setMigrationResult(null)
+    setMigrationError(null)
+    try {
+      const result = await window.appMigration.runAction(action)
+      setMigrationResult(result)
+      const mayContinue = action === 'remind-later'
+        || action === 'start-without-migration'
+        || result.status === 'completed'
+      setMigrationGateReady(mayContinue)
+      if (mayContinue && action !== 'migrate-now') setShowMigrationDialog(false)
+    } catch {
+      setMigrationError('No se pudo completar la acción de migración.')
+      setMigrationGateReady(false)
+      if (action !== 'migrate-now') setShowMigrationDialog(false)
+    } finally {
+      setMigrationRunning(false)
+    }
+  }
+
+  const migratedWorkingCopies = migrationResult
+    ? Object.values(migrationResult.workingCopies).filter((status) => status === 'completed').length
+    : 0
+  const migrationCanRetry = migrationResult?.status === 'blocked' || migrationResult?.status === 'failed'
+
   return (
     <div className="app">
+      {!migrationInspection && !showMigrationDialog && (
+        <div className="overlay" style={{ zIndex: 10000 }}>
+          <div className="dialog" style={{ width: 440 }}>
+            <div className="dialog-title">Preparando ArtiSVN…</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text2)', fontSize: 13 }}>
+              <span className="spinner" /> Comprobando datos locales
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showMigrationDialog && (
+        <div className="overlay" style={{ zIndex: 10001 }}>
+          <div className="dialog" style={{ width: 520, maxWidth: '90vw' }}>
+            <div className="dialog-title">JaviSVN ahora es ArtiSVN</div>
+            {migrationRunning ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 0', color: 'var(--text2)', fontSize: 13 }}>
+                <span className="spinner" /> Migrando configuración y copias locales…
+              </div>
+            ) : migrationResult?.status === 'completed' ? (
+              <>
+                <p style={{ fontSize: 13, color: 'var(--text2)', margin: '0 0 8px' }}>
+                  La migración terminó correctamente. Se prepararon {migratedWorkingCopies} copia{migratedWorkingCopies === 1 ? '' : 's'} local{migratedWorkingCopies === 1 ? '' : 'es'}.
+                </p>
+                <div className="dialog-actions">
+                  <button className="btn btn-primary" onClick={() => setShowMigrationDialog(false)}>Continuar</button>
+                </div>
+              </>
+            ) : migrationCanRetry ? (
+              <>
+                <p style={{ fontSize: 13, color: 'var(--text2)', margin: '0 0 8px' }}>
+                  {migrationResult?.status === 'blocked'
+                    ? 'La migración se detuvo para no sobrescribir datos existentes.'
+                    : 'La migración no pudo completarse. Puedes intentarlo de nuevo.'}
+                </p>
+                <p style={{ fontSize: 12, color: 'var(--text2)', margin: '0 0 16px' }}>
+                  No se modificaron ni se muestran credenciales en este proceso.
+                </p>
+                <div className="dialog-actions">
+                  <button className="btn btn-default" onClick={() => handleMigrationAction('start-without-migration')}>Iniciar sin migrar</button>
+                  <button className="btn btn-primary" onClick={() => handleMigrationAction('migrate-now')}>Reintentar migración</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p style={{ fontSize: 13, color: 'var(--text2)', margin: '0 0 8px' }}>
+                  Encontramos datos de JaviSVN que puedes copiar a las rutas nuevas de ArtiSVN. Los datos originales se conservarán.
+                </p>
+                {migrationError && (
+                  <p style={{ fontSize: 12, color: 'var(--danger)', margin: '0 0 12px' }}>{migrationError}</p>
+                )}
+                <div className="dialog-actions" style={{ flexWrap: 'wrap' }}>
+                  <button className="btn btn-default" onClick={() => handleMigrationAction('start-without-migration')}>Iniciar sin migrar</button>
+                  <button className="btn btn-default" onClick={() => handleMigrationAction('remind-later')}>Recordarme después</button>
+                  <button className="btn btn-primary" onClick={() => handleMigrationAction('migrate-now')}>Migrar ahora</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* App update banner */}
       {appUpdateState && ['available', 'downloading', 'downloaded'].includes(appUpdateState.stage) && (
         <div className={`update-banner update-banner-${appUpdateState.stage}`}>
@@ -621,7 +744,7 @@ export default function App() {
       )}
       {/* Titlebar */}
       <div className="titlebar">
-        <span className="titlebar-title">JaviSVN</span>
+        <span className="titlebar-title">ArtiSVN</span>
         <div className="titlebar-update-area">
           <button
             className="titlebar-update-chip"
@@ -995,7 +1118,7 @@ export default function App() {
               SVN no encontrado
             </div>
             <p style={{ fontSize: 13, color: 'var(--text2)', margin: '0 0 16px' }}>
-              SVN no está instalado en este sistema. JaviSVN lo puede instalar
+              SVN no está instalado en este sistema. ArtiSVN lo puede instalar
               automáticamente usando Homebrew.
             </p>
             {installing ? (

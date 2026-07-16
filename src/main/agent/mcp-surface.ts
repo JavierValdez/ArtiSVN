@@ -26,11 +26,11 @@ function asTextResult(value: unknown) {
 
 export function registerTools(server: McpServer, broker: BrokerRequester): void {
   server.registerTool('list_remotes', {
-    description: 'List configured SVN remotes stored in JaviSVN.'
+    description: 'List configured SVN remotes stored in ArtiSVN.'
   }, async () => asTextResult(await broker.request('list_remotes')))
 
   server.registerTool('list_local_repos', {
-    description: 'List local SVN working copies known to JaviSVN.'
+    description: 'List local SVN working copies known to ArtiSVN.'
   }, async () => asTextResult(await broker.request('list_local_repos')))
 
   server.registerTool('local_status', {
@@ -167,7 +167,7 @@ export function registerTools(server: McpServer, broker: BrokerRequester): void 
   }, async (args) => asTextResult(await broker.request('remote_info', args)))
 
   server.registerTool('checkout_remote', {
-    description: 'Create a local working copy under JaviSVN after visible user confirmation.',
+    description: 'Create a local working copy under ArtiSVN after visible user confirmation.',
     inputSchema: z.object({
       ...remoteTargetShape,
       targetName: z.string().optional()
@@ -184,8 +184,13 @@ export function registerTools(server: McpServer, broker: BrokerRequester): void 
   }, async (args) => asTextResult(await broker.request('update_local_repo', args)))
 }
 
-export function registerResources(server: McpServer, broker: BrokerRequester): void {
-  server.registerResource('remotes', 'javisvn://remotes', {
+function registerResourcesForScheme(
+  server: McpServer,
+  broker: BrokerRequester,
+  scheme: 'artisvn' | 'javisvn',
+  nameSuffix = ''
+): void {
+  server.registerResource(`remotes${nameSuffix}`, `${scheme}://remotes`, {
     title: 'Configured remotes',
     mimeType: 'application/json'
   }, async (uri) => ({
@@ -196,7 +201,7 @@ export function registerResources(server: McpServer, broker: BrokerRequester): v
     }]
   }))
 
-  server.registerResource('repos', 'javisvn://repos', {
+  server.registerResource(`repos${nameSuffix}`, `${scheme}://repos`, {
     title: 'Local repositories',
     mimeType: 'application/json'
   }, async (uri) => ({
@@ -207,12 +212,12 @@ export function registerResources(server: McpServer, broker: BrokerRequester): v
     }]
   }))
 
-  server.registerResource('repo-status', new ResourceTemplate('javisvn://repos/{repoId}/status', {
+  server.registerResource(`repo-status${nameSuffix}`, new ResourceTemplate(`${scheme}://repos/{repoId}/status`, {
     list: async () => {
       const repos = await broker.request('resource:repos') as Array<{ id: string; name: string }>
       return {
         resources: repos.map((repo) => ({
-          uri: `javisvn://repos/${repo.id}/status`,
+          uri: `${scheme}://repos/${repo.id}/status`,
           name: `${repo.name} status`,
           mimeType: 'application/json'
         }))
@@ -232,4 +237,9 @@ export function registerResources(server: McpServer, broker: BrokerRequester): v
       )
     }]
   }))
+}
+
+export function registerResources(server: McpServer, broker: BrokerRequester): void {
+  registerResourcesForScheme(server, broker, 'artisvn')
+  registerResourcesForScheme(server, broker, 'javisvn', '-legacy')
 }

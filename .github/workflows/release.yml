@@ -11,15 +11,35 @@ permissions:
 env:
   GCP_PROJECT_ID: artictools-e5538
   GCS_BUCKET: artictools-releases
-  GCS_RELEASES_PREFIX: javisvn/releases
+  GCS_RELEASES_PREFIX: artisvn/releases
+  GCS_LEGACY_RELEASES_PREFIX: javisvn/releases
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require tag to match package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(node -p "require('./package.json').version")"
+          expected_tag="v${package_version}"
+          if [ "${GITHUB_REF_NAME}" != "${expected_tag}" ]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match package.json version ${package_version}."
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.platform.name }}
+    needs: validate-tag
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 60
     strategy:
@@ -61,24 +81,15 @@ jobs:
       - name: Build artifacts
         shell: bash
         env:
+          ARTISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE: ${{ matrix.platform.allow_system_svn }}
           JAVISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE: ${{ matrix.platform.allow_system_svn }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [ -n "${{ secrets.CSC_LINK }}" ]; then
-            export CSC_LINK='${{ secrets.CSC_LINK }}'
-          fi
-          if [ -n "${{ secrets.CSC_KEY_PASSWORD }}" ]; then
-            export CSC_KEY_PASSWORD='${{ secrets.CSC_KEY_PASSWORD }}'
-          fi
-          if [ -n "${{ secrets.APPLE_ID }}" ]; then
-            export APPLE_ID='${{ secrets.APPLE_ID }}'
-          fi
-          if [ -n "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" ]; then
-            export APPLE_APP_SPECIFIC_PASSWORD='${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}'
-          fi
-          if [ -n "${{ secrets.APPLE_TEAM_ID }}" ]; then
-            export APPLE_TEAM_ID='${{ secrets.APPLE_TEAM_ID }}'
-          fi
-
+          set -euo pipefail
           npm run build
           npx electron-builder --publish never ${{ matrix.platform.args }}
 
@@ -95,7 +106,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish Cloud Storage release
+    name: Publish GitHub and Cloud Storage release
     needs: build
     runs-on: ubuntu-latest
 
@@ -109,10 +120,21 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Verify macOS and Windows installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          test -f "release-assets/ArtiSVN-Mac-${version}-Installer.dmg"
+          test -f "release-assets/ArtiSVN-Mac-${version}-Installer.zip"
+          test -f "release-assets/ArtiSVN-Windows-${version}-Setup.exe"
+          test -f "release-assets/latest-mac.yml"
+          test -f "release-assets/latest.yml"
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}
+          name: ArtiSVN ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
           files: release-assets/**/*
           fail_on_unmatched_files: true
@@ -126,34 +148,11 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v3
 
-      - name: Publish release to Cloud Storage
+      - name: Prepare versioned update metadata
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
-
-          version_dir="${GITHUB_REF_NAME}"
-          destination="gs://${GCS_BUCKET}/${GCS_RELEASES_PREFIX}"
-          version_destination="${destination}/${version_dir}/"
-          installer_assets=(
-            release-assets/*.dmg
-            release-assets/*.zip
-            release-assets/*.exe
-            release-assets/*.blockmap
-          )
-          metadata_assets=(release-assets/latest*.yml)
-
-          if [ "${#installer_assets[@]}" -eq 0 ]; then
-            echo "No installer artifacts were found."
-            exit 1
-          fi
-
-          if [ "${#metadata_assets[@]}" -eq 0 ]; then
-            echo "No update metadata files were found."
-            exit 1
-          fi
-
-          VERSION_DIR="${version_dir}" node - <<'NODE'
+          VERSION_DIR="${GITHUB_REF_NAME}" node - <<'NODE'
           const fs = require('node:fs');
           const path = require('node:path');
 
@@ -162,6 +161,10 @@ jobs:
           const metadataFiles = fs
             .readdirSync(metadataDir)
             .filter((file) => /^latest.*\.yml$/.test(file));
+
+          if (metadataFiles.length === 0) {
+            throw new Error('No update metadata files were found.');
+          }
 
           for (const file of metadataFiles) {
             const filePath = path.join(metadataDir, file);
@@ -173,33 +176,69 @@ jobs:
                   ? match
                   : `${prefix}${versionDir}/${trimmedValue}`;
               });
-
             fs.writeFileSync(filePath, nextContent);
           }
           NODE
 
-          gcloud storage cp \
-            --canned-acl=publicRead \
-            --cache-control="public,max-age=31536000,immutable" \
-            "${installer_assets[@]}" \
-            "${version_destination}"
-
-          gcloud storage cp \
-            --canned-acl=publicRead \
-            --cache-control="no-cache" \
-            "${metadata_assets[@]}" \
-            "${destination}/"
-
-      - name: Verify published metadata
+      - name: Publish identical release to canonical and legacy channels
         shell: bash
         run: |
           set -euo pipefail
-          base_url="https://storage.googleapis.com/${GCS_BUCKET}/${GCS_RELEASES_PREFIX}"
+          shopt -s nullglob
 
-          for metadata in latest.yml latest-mac.yml; do
-            curl --fail --silent --show-error "${base_url}/${metadata}" --output "${metadata}"
+          installer_assets=(
+            release-assets/*.dmg
+            release-assets/*.zip
+            release-assets/*.exe
+            release-assets/*.blockmap
+          )
+          metadata_assets=(release-assets/latest*.yml)
 
-            mapfile -t asset_paths < <(node - "${metadata}" <<'NODE'
+          if [ "${#installer_assets[@]}" -eq 0 ] || [ "${#metadata_assets[@]}" -eq 0 ]; then
+            echo "Installer artifacts or update metadata are missing."
+            exit 1
+          fi
+
+          for prefix in "${GCS_RELEASES_PREFIX}" "${GCS_LEGACY_RELEASES_PREFIX}"; do
+            destination="gs://${GCS_BUCKET}/${prefix}"
+            version_destination="${destination}/${GITHUB_REF_NAME}/"
+
+            gcloud storage cp \
+              --canned-acl=publicRead \
+              --cache-control="public,max-age=31536000,immutable" \
+              "${installer_assets[@]}" \
+              "${version_destination}"
+
+            gcloud storage cp \
+              --canned-acl=publicRead \
+              --cache-control="no-cache" \
+              "${metadata_assets[@]}" \
+              "${destination}/"
+          done
+
+      - name: Verify both Cloud Storage channels
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          expected_assets=(
+            "${GITHUB_REF_NAME}/ArtiSVN-Mac-${version}-Installer.dmg"
+            "${GITHUB_REF_NAME}/ArtiSVN-Mac-${version}-Installer.zip"
+            "${GITHUB_REF_NAME}/ArtiSVN-Windows-${version}-Setup.exe"
+          )
+
+          for prefix in "${GCS_RELEASES_PREFIX}" "${GCS_LEGACY_RELEASES_PREFIX}"; do
+            base_url="https://storage.googleapis.com/${GCS_BUCKET}/${prefix}"
+
+            for expected_asset in "${expected_assets[@]}"; do
+              curl --fail --silent --show-error --head "${base_url}/${expected_asset}" >/dev/null
+            done
+
+            for metadata in latest.yml latest-mac.yml; do
+              metadata_copy="$(mktemp)"
+              curl --fail --silent --show-error "${base_url}/${metadata}" --output "${metadata_copy}"
+
+              mapfile -t asset_paths < <(node - "${metadata_copy}" <<'NODE'
           const fs = require('node:fs');
           const metadataPath = process.argv[2];
           const content = fs.readFileSync(metadataPath, 'utf8');
@@ -214,87 +253,22 @@ jobs:
 
           process.stdout.write([...paths].join('\n'));
           NODE
-            )
+              )
 
-            for asset_path in "${asset_paths[@]}"; do
-              curl --fail --silent --show-error --head "${base_url}/${asset_path}" >/dev/null
+              if [ "${#asset_paths[@]}" -eq 0 ]; then
+                echo "No versioned assets found in ${prefix}/${metadata}."
+                exit 1
+              fi
+
+              for asset_path in "${asset_paths[@]}"; do
+                case "${asset_path}" in
+                  "${GITHUB_REF_NAME}/"*) ;;
+                  *)
+                    echo "Metadata ${prefix}/${metadata} does not point to ${GITHUB_REF_NAME}: ${asset_path}"
+                    exit 1
+                    ;;
+                esac
+                curl --fail --silent --show-error --head "${base_url}/${asset_path}" >/dev/null
+              done
             done
           done
-
-      - name: Keep only five Cloud Storage releases
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          destination="gs://${GCS_BUCKET}/${GCS_RELEASES_PREFIX}"
-          version_list="$(mktemp)"
-          delete_list="$(mktemp)"
-
-          gcloud storage ls "${destination}/" > "${version_list}" || true
-
-          node - "${version_list}" > "${delete_list}" <<'NODE'
-          const fs = require('node:fs');
-          const listPath = process.argv[2];
-          const versions = new Set();
-
-          for (const line of fs.readFileSync(listPath, 'utf8').split(/\r?\n/)) {
-            const match = line.match(/\/(v\d+\.\d+\.\d+(?:[-+][^/]+)?)\/$/);
-            if (match) {
-              versions.add(match[1]);
-            }
-          }
-
-          function parseVersion(value) {
-            const match = value.match(/^v(\d+)\.(\d+)\.(\d+)(?:-([^+]+))?/);
-            if (!match) {
-              return null;
-            }
-
-            return {
-              value,
-              major: Number(match[1]),
-              minor: Number(match[2]),
-              patch: Number(match[3]),
-              prerelease: match[4] || '',
-            };
-          }
-
-          function compareVersions(left, right) {
-            for (const key of ['major', 'minor', 'patch']) {
-              if (left[key] !== right[key]) {
-                return right[key] - left[key];
-              }
-            }
-
-            if (!left.prerelease && right.prerelease) {
-              return -1;
-            }
-
-            if (left.prerelease && !right.prerelease) {
-              return 1;
-            }
-
-            return right.prerelease.localeCompare(left.prerelease);
-          }
-
-          const sortedVersions = [...versions]
-            .map(parseVersion)
-            .filter(Boolean)
-            .sort(compareVersions);
-
-          process.stdout.write(sortedVersions.slice(5).map((version) => version.value).join('\n'));
-          NODE
-
-          while read -r version_dir; do
-            if [ -n "${version_dir}" ]; then
-              gcloud storage rm --recursive "${destination}/${version_dir}/"
-            fi
-          done < "${delete_list}"
-
-          legacy_root_assets=()
-          while IFS= read -r asset; do legacy_root_assets+=("${asset}"); done < <(gcloud storage ls "${destination}/JaviSVN-*" 2>/dev/null || true)
-          while IFS= read -r asset; do legacy_root_assets+=("${asset}"); done < <(gcloud storage ls "${destination}/JaviSVN Setup*" 2>/dev/null || true)
-
-          if [ "${#legacy_root_assets[@]}" -gt 0 ]; then
-            gcloud storage rm "${legacy_root_assets[@]}"
-          fi

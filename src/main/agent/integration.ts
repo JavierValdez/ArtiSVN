@@ -1,7 +1,9 @@
 import { app, BrowserWindow, dialog } from 'electron'
 import type { MessageBoxOptions } from 'electron'
+import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { ensureAgentIntegrationToken, getAgentIntegrationState, regenerateAgentIntegrationToken, setAgentIntegrationEnabled } from '../services/store'
+import { resolveLocalPaths } from '../services/local-paths'
 import {
   listLocalRepos,
   listRemote,
@@ -24,7 +26,7 @@ import {
 import { listRemotes } from '../services/store'
 import { checkoutRemoteToLocalRepo, deriveCheckoutTargetName, sanitizeLocalRepoName } from '../services/checkout'
 import { updateLocalRepo } from '../services/update'
-import { buildAgentClientLaunchConfig } from './client-config'
+import { buildAgentClientEnvironment, buildAgentClientLaunchConfig } from './client-config'
 import { AgentActivityLog } from './activity-log'
 import { AgentBrokerServer } from './broker'
 import { resolveAgentBrokerEndpoint } from './endpoint'
@@ -38,10 +40,18 @@ export interface AgentIntegrationPublicState {
   activity: AgentActivityEntry[]
 }
 
+function getAgentDataDirectory(): string {
+  const directory = resolveLocalPaths({
+    appDataPath: app.getPath('appData')
+  }).appDirectory
+  mkdirSync(directory, { recursive: true })
+  return directory
+}
+
 export function getAgentBrokerEndpoint(): string {
   return resolveAgentBrokerEndpoint({
     platform: process.platform,
-    userDataPath: process.platform === 'win32' ? '' : app.getPath('userData')
+    userDataPath: process.platform === 'win32' ? '' : getAgentDataDirectory()
   })
 }
 
@@ -50,7 +60,7 @@ let broker: AgentBrokerServer | null = null
 
 function getActivityLog(): AgentActivityLog {
   if (!activityLog) {
-    activityLog = new AgentActivityLog(join(app.getPath('userData'), 'javisvn-agent-activity.json'))
+    activityLog = new AgentActivityLog(join(getAgentDataDirectory(), 'artisvn-agent-activity.json'))
   }
   return activityLog
 }
@@ -95,7 +105,7 @@ async function confirmAgentCheckout(
       `${session.clientName} solicitó checkout de:\n${url}` +
       `${revision ? `\nRevisión: r${revision}` : ''}` +
       `\nDestino local: ${targetName}\n\n` +
-      'La copia se guardará en la carpeta local de JaviSVN y aparecerá en la lista de repositorios.'
+      'La copia se guardará en la carpeta local de ArtiSVN y aparecerá en la lista de repositorios.'
   }
   const ownerWindow = getDialogOwnerWindow()
   const { response } = ownerWindow
@@ -408,7 +418,7 @@ export function getAgentClientConfig(): {
   const mcpBridgeExePath = (() => {
     if (!app.isPackaged) return undefined
     if (process.platform === 'darwin' || process.platform === 'linux') {
-      return join(process.resourcesPath, 'bridge', 'javisvn-mcp-bridge')
+      return join(process.resourcesPath, 'bridge', 'artisvn-mcp-bridge')
     }
     return undefined
   })()
@@ -418,13 +428,13 @@ export function getAgentClientConfig(): {
     execPath: process.execPath,
     launchArgs,
     comSpec: process.env.ComSpec,
-    stdioEnvKey: 'JAVISVN_MCP_STDIO',
-    mcpBridgeExeName: app.isPackaged && process.platform === 'win32' ? 'JaviSvnMcp.exe' : undefined,
+    stdioEnvKey: 'ARTISVN_MCP_STDIO',
+    mcpBridgeExeName: app.isPackaged && process.platform === 'win32' ? 'ArtiSvnMcp.exe' : undefined,
     mcpBridgeExePath
   })
 
   return {
     ...launchConfig,
-    env: { JAVISVN_MCP_TOKEN: token, JAVISVN_MCP_STDIO: '1', ELECTRON_RUN_AS_NODE: '' }
+    env: buildAgentClientEnvironment(token)
   }
 }

@@ -1,7 +1,7 @@
 // Test/diagnostic client for the MCP bridge.
 //
 // Usage:
-//   set JAVISVN_MCP_TOKEN=<token-from-app>
+//   set ARTISVN_MCP_TOKEN=<token-from-app>
 //   node mcp-bridge/test-client.cjs <path-to-bridge.exe-or-bundle.cjs>
 //
 // Sends an MCP `initialize` and `tools/list` and prints the responses.
@@ -17,9 +17,9 @@ if (!exePath) {
   process.exit(2);
 }
 
-const token = process.env.JAVISVN_MCP_TOKEN;
+const token = process.env.ARTISVN_MCP_TOKEN ?? process.env.JAVISVN_MCP_TOKEN;
 if (!token) {
-  console.error('Missing JAVISVN_MCP_TOKEN env var. Copy it from the app (Integracion IA settings).');
+  console.error('Missing ARTISVN_MCP_TOKEN env var. Copy it from the app (Integracion IA settings).');
   process.exit(2);
 }
 
@@ -27,8 +27,8 @@ const child = spawn(exePath, args, {
   stdio: ['pipe', 'pipe', 'pipe'],
   env: {
     ...process.env,
-    JAVISVN_MCP_TOKEN: token,
-    JAVISVN_MCP_DEBUG: '1',
+    ARTISVN_MCP_TOKEN: token,
+    ARTISVN_MCP_DEBUG: '1',
     // Simulate Electron-based MCP clients (Kiro CLI, Claude Desktop) that
     // inherit ELECTRON_RUN_AS_NODE=1 to their child processes. The bridge
     // must work regardless because it is plain Node, not Electron.

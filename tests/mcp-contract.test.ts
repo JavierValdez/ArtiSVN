@@ -26,7 +26,7 @@ test('MCP surface lists tools and resources and serves responses', async () => {
     }
   }
 
-  const server = new McpServer({ name: 'javisvn-test', version: '1.0.0' })
+  const server = new McpServer({ name: 'artisvn-test', version: '1.0.0' })
   registerTools(server, broker)
   registerResources(server, broker)
 
@@ -95,11 +95,17 @@ test('MCP surface lists tools and resources and serves responses', async () => {
   )
 
   const resources = await client.listResources()
+  assert.ok(resources.resources.some((resource) => resource.uri === 'artisvn://remotes'))
+  assert.ok(resources.resources.some((resource) => resource.uri === 'artisvn://repos'))
+  assert.ok(resources.resources.some((resource) => resource.uri === 'artisvn://repos/repo-1/status'))
   assert.ok(resources.resources.some((resource) => resource.uri === 'javisvn://remotes'))
+  assert.ok(resources.resources.some((resource) => resource.uri === 'javisvn://repos'))
   assert.ok(resources.resources.some((resource) => resource.uri === 'javisvn://repos/repo-1/status'))
 
-  const resource = await client.readResource({ uri: 'javisvn://repos/repo-1/status' })
-  assert.match(JSON.stringify(resource), /README\.md/)
+  const canonicalResource = await client.readResource({ uri: 'artisvn://repos/repo-1/status' })
+  const legacyResource = await client.readResource({ uri: 'javisvn://repos/repo-1/status' })
+  assert.match(JSON.stringify(canonicalResource), /README\.md/)
+  assert.match(JSON.stringify(legacyResource), /README\.md/)
   assert.ok(calls.some((call) => call.method === 'resource:repo_status'))
 
   await Promise.all([client.close(), server.close()])

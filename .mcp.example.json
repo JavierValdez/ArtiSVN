@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "artisvn": {
+      "command": "/Applications/ArtiSVN.app/Contents/Resources/bridge/artisvn-mcp-bridge",
+      "args": []
+    }
+  }
+}

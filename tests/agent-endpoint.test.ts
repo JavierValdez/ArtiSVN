@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { resolveAgentBrokerEndpoint, WINDOWS_AGENT_BROKER_ENDPOINT } from '../src/main/agent/endpoint'
 
-test('windows broker endpoint uses the local named pipe prefix expected by Node', () => {
+test('windows broker endpoint preserves the legacy pipe for installed bridges', () => {
   assert.equal(WINDOWS_AGENT_BROKER_ENDPOINT, String.raw`\\.\pipe\javisvn-agent-broker`)
   assert.equal(WINDOWS_AGENT_BROKER_ENDPOINT.split('.')[0], String.raw`\\`)
   assert.equal(
@@ -11,7 +11,7 @@ test('windows broker endpoint uses the local named pipe prefix expected by Node'
   )
 })
 
-test('mac broker endpoint uses the app userData socket when it fits platform limits', () => {
+test('mac broker endpoint preserves the legacy socket name when it fits platform limits', () => {
   assert.equal(
     resolveAgentBrokerEndpoint({
       platform: 'darwin',

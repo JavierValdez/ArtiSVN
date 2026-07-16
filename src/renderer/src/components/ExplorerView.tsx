@@ -1893,7 +1893,7 @@ export default function ExplorerView({
                   autoFocus
                 />
                 <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 4 }}>
-                  Se creará en ~/Documents/JaviSvn/{checkout.name}
+                  Se creará en ~/Documents/ArtiSVN/{checkout.name}
                 </div>
               </div>
             )}

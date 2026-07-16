@@ -3,8 +3,8 @@
 #
 # Uso: powershell -ExecutionPolicy Bypass -File scripts/bundle-svn.ps1
 # Modo por defecto: usa SOLO binario interno existente en resources/bin/svn.exe
-# Fallback opcional (mantenimiento): si seteas JAVISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE=1,
-# permite copiar desde TortoiseSVN/PATH para regenerar el bundle interno.
+# Fallback opcional (mantenimiento): ARTISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE=1.
+# JAVISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE=1 se conserva como alias transitorio.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -29,7 +29,7 @@ if (Test-Path $bundledSvn) {
   }
 }
 
-$allowSystem = ($env:JAVISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE -eq '1')
+$allowSystem = (($env:ARTISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE -eq '1') -or ($env:JAVISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE -eq '1'))
 if (-not $allowSystem) {
   Write-Error @"
 ERROR: No existe un SVN interno válido en resources/bin/svn.exe.
@@ -37,12 +37,13 @@ Política actual: NO usar SVN del sistema para el build.
 
 Opciones:
 1) Proveer el bundle interno (svn.exe + DLLs) en resources/bin/
-2) Solo para regenerar bundle local: set JAVISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE=1 y reintentar
+2) Solo para regenerar bundle local: set ARTISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE=1 y reintentar
+   (JAVISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE=1 sigue disponible como alias)
 "@
   exit 1
 }
 
-Write-Warning "JAVISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE=1 activo: se usará SVN del sistema para regenerar bundle interno."
+Write-Warning "ARTISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE=1 activo: se usará SVN del sistema para regenerar bundle interno."
 
 # ─── Locate SVN ───────────────────────────────────────────────────────────────
 $candidates = @(

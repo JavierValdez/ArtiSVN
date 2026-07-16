@@ -85,8 +85,8 @@ export default function Sidebar({
     <div className="sidebar">
       {/* Logo */}
       <div className="sidebar-header">
-        <img src={appIcon} alt="JaviSVN" className="sidebar-logo" />
-        <div className="sidebar-appname">JaviSVN</div>
+        <img src={appIcon} alt="ArtiSVN" className="sidebar-logo" />
+        <div className="sidebar-appname">ArtiSVN</div>
       </div>
 
       {/* Repos section */}

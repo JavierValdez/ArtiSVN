@@ -3,11 +3,12 @@
 // Pipeline:
 //   1. esbuild bundle  -> dist-mcp-bridge/bridge.cjs (todas las deps inline)
 //   2. Si --sea en Windows, crear binario standalone con Node SEA.
-//      Resultado: dist-mcp-bridge/JaviSvnMcp.exe (CONSOLE subsystem).
-//   3. En macOS/Linux, generar launcher script que envuelve bridge.cjs con node.
+//      Resultado canonico: dist-mcp-bridge/ArtiSvnMcp.exe (CONSOLE subsystem),
+//      mas el alias legacy JaviSvnMcp.exe.
+//   3. En macOS/Linux, generar launchers artisvn-mcp-bridge y su alias legacy.
 //
 // El binario/script resultante es lo que el instalador shipea. La app GUI
-// (JaviSVN) NO cambia.
+// (ArtiSVN) usa este bridge para la superficie MCP.
 
 import { spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -24,10 +25,12 @@ const OUT_DIR = resolve(ROOT, 'dist-mcp-bridge')
 const BUNDLE_PATH = resolve(OUT_DIR, 'bridge.cjs')
 const SEA_BLOB_PATH = resolve(OUT_DIR, 'sea-prep.blob')
 const SEA_CONFIG_PATH = resolve(OUT_DIR, 'sea-config.json')
-const EXE_NAME = 'JaviSvnMcp.exe'
+const EXE_NAME = 'ArtiSvnMcp.exe'
 const EXE_PATH = resolve(OUT_DIR, EXE_NAME)
-const LAUNCHER_NAME = 'javisvn-mcp-bridge'
+const LEGACY_EXE_PATH = resolve(OUT_DIR, 'JaviSvnMcp.exe')
+const LAUNCHER_NAME = 'artisvn-mcp-bridge'
 const LAUNCHER_PATH = resolve(OUT_DIR, LAUNCHER_NAME)
+const LEGACY_LAUNCHER_PATH = resolve(OUT_DIR, 'javisvn-mcp-bridge')
 
 const args = new Set(process.argv.slice(2))
 const buildSea = args.has('--sea')
@@ -51,6 +54,7 @@ async function bundle() {
     minify: false,
     legalComments: 'none',
     define: {
+      'process.env.ARTISVN_BRIDGE_VERSION': JSON.stringify(version),
       'process.env.JAVISVN_BRIDGE_VERSION': JSON.stringify(version)
     },
     external: [],
@@ -67,13 +71,15 @@ function writeLauncherScript() {
   // un mensaje claro.
   const script = `#!/usr/bin/env bash
 if ! command -v node &> /dev/null; then
-  echo "[javisvn-mcp-bridge] ERROR: node no encontrado en PATH. Instala Node.js 20+." >&2
+  echo "[artisvn-mcp-bridge] ERROR: node no encontrado en PATH. Instala Node.js 20+." >&2
   exit 1
 fi
 exec node "$(dirname "$0")/bridge.cjs" "$@"
 `
   writeFileSync(LAUNCHER_PATH, script, { mode: 0o755 })
+  writeFileSync(LEGACY_LAUNCHER_PATH, script, { mode: 0o755 })
   console.log(`[launcher] OK -> ${LAUNCHER_PATH}`)
+  console.log(`[launcher] alias legacy -> ${LEGACY_LAUNCHER_PATH}`)
 }
 
 function buildSeaExe() {
@@ -123,6 +129,11 @@ function buildSeaExe() {
   }
 
   console.log(`[sea] OK -> ${EXE_PATH}`)
+  if (existsSync(LEGACY_EXE_PATH)) {
+    rmSync(LEGACY_EXE_PATH, { force: true, maxRetries: 3, retryDelay: 200 })
+  }
+  copyFileSync(EXE_PATH, LEGACY_EXE_PATH)
+  console.log(`[sea] alias legacy -> ${LEGACY_EXE_PATH}`)
 }
 
 ;(async () => {

@@ -164,6 +164,12 @@ const svnAPI = {
   }
 }
 
+const appMigrationAPI = {
+  inspect: () => ipcRenderer.invoke('appMigration:inspect'),
+  runAction: (action: 'migrate-now' | 'remind-later' | 'start-without-migration') =>
+    ipcRenderer.invoke('appMigration:runAction', action)
+}
+
 const appUpdateAPI = {
   getState: () => ipcRenderer.invoke('appUpdate:getState'),
   check: () => ipcRenderer.invoke('appUpdate:check'),
@@ -197,12 +203,14 @@ const agentIntegrationAPI = {
 if (process.contextIsolated) {
   try {
     contextBridge.exposeInMainWorld('appUpdate', appUpdateAPI)
+    contextBridge.exposeInMainWorld('appMigration', appMigrationAPI)
     contextBridge.exposeInMainWorld('agentIntegration', agentIntegrationAPI)
   } catch (error) {
     console.error(error)
   }
 } else {
   ;(globalThis as any).appUpdate = appUpdateAPI
+  ;(globalThis as any).appMigration = appMigrationAPI
   ;(globalThis as any).agentIntegration = agentIntegrationAPI
 }
 
