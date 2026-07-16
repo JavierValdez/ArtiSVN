@@ -36,14 +36,14 @@ Descarga el `.exe` desde la [última release](https://github.com/JavierValdez/Ar
 
 ## Migración desde JaviSVN
 
-La versión 2.2.0 adopta la identidad **ArtiSVN**: paquete npm `artisvn`, app ID `com.artisvn.app`, aplicación/instaladores `ArtiSVN` y repositorio público `JavierValdez/ArtiSVN`.
+La versión 2.2.1 adopta la identidad **ArtiSVN**: paquete npm `artisvn`, app ID `com.artisvn.app`, aplicación/instaladores `ArtiSVN` y repositorio público `JavierValdez/ArtiSVN`.
 
 Rutas canónicas nuevas:
 
 - configuración macOS: `~/Library/Application Support/artisvn/artisvn-config.json`
 - configuración Windows: `%APPDATA%\artisvn\artisvn-config.json`
-- working copies macOS: `~/Documents/ArtiSvn/`
-- working copies Windows: `%USERPROFILE%\Documents\ArtiSvn\`
+- working copies macOS: `~/Documents/ArtiSVN/`
+- working copies Windows: `%USERPROFILE%\Documents\ArtiSVN\`
 - bridge macOS: `/Applications/ArtiSVN.app/Contents/Resources/bridge/artisvn-mcp-bridge`
 - bridge Windows: `ArtiSvnMcp.exe` dentro de la instalación de ArtiSVN
 
@@ -105,11 +105,11 @@ Flujo:
 
 1. Actualiza `version` en `package.json` y `package-lock.json`.
 2. Commit/push según el proceso del equipo.
-3. Crea y empuja el tag coincidente, por ejemplo `v2.2.0`.
+3. Crea y empuja el tag coincidente, por ejemplo `v2.2.1`.
 
 ```bash
-git tag v2.2.0
-git push origin v2.2.0
+git tag v2.2.1
+git push origin v2.2.1
 ```
 
 Fallback manual:

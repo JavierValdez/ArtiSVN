@@ -6,7 +6,7 @@ Guía de referencia para agentes que trabajen en este proyecto.
 
 **ArtiSVN** (antes JaviSVN) es un cliente de escritorio SVN para macOS y Windows inspirado en GitHub Desktop. Usa Electron 32, electron-vite 5, React 18, TypeScript, ESM obligatorio y SVN CLI mediante `child_process.spawn` centralizado.
 
-Identidad de distribución desde 2.2.0:
+Identidad de distribución desde 2.2.1:
 
 - package: `artisvn`
 - productName: `ArtiSVN`
@@ -18,7 +18,7 @@ Identidad de distribución desde 2.2.0:
 
 Rutas canónicas:
 
-- repos: `~/Documents/ArtiSvn/` (macOS) o `%USERPROFILE%\Documents\ArtiSvn\` (Windows)
+- repos: `~/Documents/ArtiSVN/` (macOS) o `%USERPROFILE%\Documents\ArtiSVN\` (Windows)
 - config: `~/Library/Application Support/artisvn/artisvn-config.json` o `%APPDATA%\artisvn\artisvn-config.json`
 - bridge macOS: `ArtiSVN.app/Contents/Resources/bridge/artisvn-mcp-bridge`
 - bridge Windows: `ArtiSvnMcp.exe`

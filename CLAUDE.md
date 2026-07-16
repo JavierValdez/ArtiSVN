@@ -17,7 +17,7 @@ Never set `ELECTRON_RUN_AS_NODE`. Root `npx tsc --noEmit` is not sufficient beca
 
 ## Distribution identity and migration
 
-Version 2.2.0 uses package `artisvn`, product `ArtiSVN`, app ID `com.artisvn.app`, and GitHub repository `JavierValdez/ArtiSVN`. Canonical data paths are `~/Library/Application Support/artisvn/artisvn-config.json` and `~/Documents/ArtiSvn/` on macOS, with `%APPDATA%\artisvn\artisvn-config.json` and `%USERPROFILE%\Documents\ArtiSvn\` on Windows.
+Version 2.2.1 uses package `artisvn`, product `ArtiSVN`, app ID `com.artisvn.app`, and GitHub repository `JavierValdez/ArtiSVN`. Canonical data paths are `~/Library/Application Support/artisvn/artisvn-config.json` and `~/Documents/ArtiSVN/` on macOS, with `%APPDATA%\artisvn\artisvn-config.json` and `%USERPROFILE%\Documents\ArtiSVN\` on Windows.
 
 Migration support imports/recognizes the old `javisvn/javisvn-config.json` and `Documents/JaviSvn` locations. New MCP integrations use `bridge/artisvn-mcp-bridge` (macOS) or `ArtiSvnMcp.exe` (Windows); packages temporarily retain `javisvn-mcp-bridge` and `JaviSvnMcp.exe`. Do not remove legacy aliases or `JAVISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE` until compatibility is intentionally retired. The canonical bundle flag is `ARTISVN_ALLOW_SYSTEM_SVN_FOR_BUNDLE`.
 
