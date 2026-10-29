@@ -13,6 +13,8 @@
  *   issued by an internal CA (verified anonymously on 2026-10-27).
  */
 
+import { EOL } from 'node:os'
+
 export type SvnTlsMode = 'strict' | 'legacy-sat'
 
 export type SvnTrustFailure = 'unknown-ca' | 'cn-mismatch' | 'expired' | 'not-yet-valid' | 'other'
@@ -257,5 +259,6 @@ export function buildSvnInvocation(input: SvnInvocationInput): SvnInvocation {
     throw new Error('La contraseña SVN contiene saltos de línea no soportados')
   }
   args.push('--username', credentials.username, '--password-from-stdin')
-  return { args: [...args, ...targetArgs], stdin: `${credentials.password}\n`, sendsCredentials: true }
+  // svn reads stdin using APR_EOL_STR: a bare LF becomes part of the password on Windows.
+  return { args: [...args, ...targetArgs], stdin: `${credentials.password}${EOL}`, sendsCredentials: true }
 }

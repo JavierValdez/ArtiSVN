@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { posix } from 'node:path'
 
 // Keep this legacy endpoint stable: previously installed JaviSVN bridges connect here.
 // Runtime path must be \\.\pipe\javisvn-agent-broker; over-escaping breaks listen() on Windows.
@@ -17,8 +17,8 @@ export function resolveAgentBrokerEndpoint(input: {
 }): string {
   if (input.platform === 'win32') return WINDOWS_AGENT_BROKER_ENDPOINT
 
-  const preferred = join(input.userDataPath, `${BROKER_NAME}.sock`)
+  const preferred = posix.join(input.userDataPath, `${BROKER_NAME}.sock`)
   if (Buffer.byteLength(preferred, 'utf-8') <= MAX_UNIX_SOCKET_PATH_BYTES) return preferred
 
-  return join(input.tempDir ?? tmpdir(), `${BROKER_NAME}-${input.uid ?? process.getuid?.() ?? 'u'}.sock`)
+  return posix.join(input.tempDir ?? tmpdir(), `${BROKER_NAME}-${input.uid ?? process.getuid?.() ?? 'u'}.sock`)
 }

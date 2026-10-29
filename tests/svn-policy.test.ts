@@ -77,9 +77,21 @@ test('the password is sent through stdin, never argv', () => {
   assert.ok(invocation.args.includes('--password-from-stdin'))
   assert.ok(!invocation.args.includes('--password'))
   assert.ok(invocation.args.every((arg) => !arg.includes(SECRET)), 'la contraseña no está en argv')
-  assert.equal(invocation.stdin, `${SECRET}\n`)
+  assert.equal(invocation.stdin, `${SECRET}${process.platform === 'win32' ? '\r\n' : '\n'}`)
   assert.ok(invocation.args.includes('--non-interactive'))
   assert.ok(invocation.args.some((arg) => arg.startsWith('--trust-server-cert-failures=')))
+})
+
+test('passwords containing CR or LF cannot inject another stdin line', () => {
+  const origin = parseSvnOrigin('svn://127.0.0.1/repo')
+  for (const separator of ['\r', '\n', '\r\n']) {
+    assert.throws(() => buildSvnInvocation({
+      args: ['info', 'svn://127.0.0.1/repo'],
+      origin,
+      policy: resolveTlsPolicy(origin),
+      credentials: { username: 'tester', password: `first${separator}second` }
+    }), /saltos de línea/)
+  }
 })
 
 test('credentials are never sent over http and strict origins get no trust flags', () => {

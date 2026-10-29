@@ -1,6 +1,6 @@
 {
   "name": "artisvn",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "description": "SVN Desktop Client - Cliente SVN estilo GitHub Desktop",
   "type": "module",
   "main": "./out/main/index.js",

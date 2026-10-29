@@ -22,7 +22,7 @@ describe('physical path isolation', () => {
   let outside = ''
 
   before(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'artisvn-paths-')))
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'artisvn-paths-')))
     base = join(root, 'ArtiSVN')
     repo = join(base, 'repo')
     outside = join(root, 'outside')
@@ -66,12 +66,12 @@ describe('physical path isolation', () => {
 
   test('SVN operations may target the symlink itself (svn does not follow it)', () => {
     const target = resolvePhysicalRepoTarget(repo, 'enlace.txt', { allowSymlinkLeaf: true })
-    assert.equal(target.targetReal, join(realpathSync(repo), 'enlace.txt'))
+    assert.equal(target.targetReal, join(realpathSync.native(repo), 'enlace.txt'))
   })
 
   test('symlinks that stay inside the repo and "..foo" files are allowed', () => {
     const inside = resolvePhysicalRepoTarget(repo, 'enlace-interno.txt')
-    assert.equal(inside.targetReal, join(realpathSync(repo), 'src', 'ok.txt'))
+    assert.equal(inside.targetReal, join(realpathSync.native(repo), 'src', 'ok.txt'))
     assert.equal(resolvePhysicalRepoTarget(repo, '..foo').exists, true)
   })
 

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { join } from 'node:path'
 import {
   buildHistoricalRemoteTarget,
   buildRepoId,
@@ -32,7 +33,7 @@ test('read contract truncates large text and produces stable repo ids', () => {
 })
 
 test('read contract rejects file targets outside the repository', () => {
-  assert.equal(resolveRepoRelativeTarget('/tmp/repo', 'src/app.ts').relativePath, 'src/app.ts')
+  assert.equal(resolveRepoRelativeTarget('/tmp/repo', 'src/app.ts').relativePath, join('src', 'app.ts'))
   assert.throws(() => resolveRepoRelativeTarget('/tmp/repo', '../outside.ts'), /fuera del repositorio/)
 })
 

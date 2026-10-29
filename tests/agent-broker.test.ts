@@ -10,6 +10,7 @@ import { AgentBrokerServer } from '../src/main/agent/broker'
 const tempDirs: string[] = []
 
 function createEndpoint(): string {
+  if (process.platform === 'win32') return String.raw`\\.\pipe\artisvn-broker-test-${randomUUID()}`
   const dir = mkdtempSync(join(tmpdir(), 'javisvn-broker-test-'))
   tempDirs.push(dir)
   return join(dir, `${randomUUID()}.sock`)
