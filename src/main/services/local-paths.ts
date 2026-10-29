@@ -48,4 +48,14 @@ export function resolveLocalPaths(options: LocalPathOptions): LocalPaths {
   }
 }
 
-export const BASE_REPO_PATH = join(homedir(), 'Documents', CANONICAL_REPOS_DIRECTORY_NAME)
+/**
+ * Development/smoke-test isolation only: `ARTISVN_DEV_DOCUMENTS_DIR` replaces
+ * ~/Documents when the app runs under `electron-vite dev` (NODE_ENV=development).
+ * Packaged builds never set NODE_ENV=development, so the override is ignored there.
+ */
+export function resolveDocumentsDirectory(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
+  const devOverride = env.NODE_ENV === 'development' ? String(env.ARTISVN_DEV_DOCUMENTS_DIR || '').trim() : ''
+  return devOverride || join(home, 'Documents')
+}
+
+export const BASE_REPO_PATH = join(resolveDocumentsDirectory(), CANONICAL_REPOS_DIRECTORY_NAME)

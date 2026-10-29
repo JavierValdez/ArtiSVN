@@ -1,5 +1,7 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useId } from 'react'
 import { EditorId, EditorOption, LocalRepo, RemoteServer } from '../types/svn'
+import { describeRepoMeta, repoChangesBadge } from '../utils/repoMeta'
+import { filterLocalRepos } from '../utils/repoFilter'
 import appIcon from '../assets/icon.png'
 
 interface Props {
@@ -21,17 +23,6 @@ interface Props {
   onRenameRemote: (remote: RemoteServer) => void
   onOpenProfile: () => void
   onOpenAgentIntegration: () => void
-}
-
-function timeAgo(dateStr: string): string {
-  if (!dateStr) return ''
-  const date = new Date(dateStr)
-  const now = new Date()
-  const diff = Math.floor((now.getTime() - date.getTime()) / 1000)
-  if (diff < 60) return 'hace un momento'
-  if (diff < 3600) return `hace ${Math.floor(diff / 60)} min`
-  if (diff < 86400) return `hace ${Math.floor(diff / 3600)}h`
-  return `hace ${Math.floor(diff / 86400)} días`
 }
 
 export default function Sidebar({
@@ -58,6 +49,21 @@ export default function Sidebar({
   const menuRef = useRef<HTMLDivElement | null>(null)
   const [openRemoteMenuId, setOpenRemoteMenuId] = useState<string | null>(null)
   const remoteMenuRef = useRef<HTMLDivElement | null>(null)
+  const [repoQuery, setRepoQuery] = useState('')
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
+  const searchId = useId()
+  // Local-only view filter: never changes the repo list, the selection or the remotes.
+  const visibleRepos = filterLocalRepos(repos, repoQuery)
+  const isFiltering = repoQuery.trim().length > 0
+
+  const updateRepoQuery = (value: string) => {
+    setRepoQuery(value)
+    setOpenMenuPath(null)
+  }
+  const clearRepoQuery = () => {
+    updateRepoQuery('')
+    searchInputRef.current?.focus()
+  }
 
   useEffect(() => {
     if (!openMenuPath) return
@@ -91,24 +97,75 @@ export default function Sidebar({
 
       {/* Repos section */}
       <div className="sidebar-section" style={{ flex: 1, overflowY: 'auto' }}>
-        <div className="sidebar-section-title">
-          Repositorios locales
-          <button
-            className="btn btn-ghost"
-            style={{ padding: '2px 6px', fontSize: 11, marginLeft: 4 }}
-            onClick={onRefresh}
-            title="Actualizar lista"
-          >
-            ⟳
-          </button>
-        </div>
-
-        {repos.length === 0 ? (
-          <div style={{ padding: '12px', fontSize: 12, color: 'var(--sidebar-muted)', textAlign: 'center', lineHeight: 1.5 }}>
-            Sin repositorios locales.{'\n'}Explora el servidor para clonar.
+        <div className="sidebar-local-repos">
+          {/* Sticky while scrolling the local list (stops before the remotes section). */}
+          <div className="sidebar-local-head">
+            <div className="sidebar-section-title">
+              Repositorios locales
+              <button
+                className="btn btn-ghost"
+                style={{ padding: '2px 6px', fontSize: 11, marginLeft: 4 }}
+                onClick={onRefresh}
+                title="Actualizar lista"
+              >
+                ⟳
+              </button>
+            </div>
+            {repos.length > 0 && (
+              <div className="sidebar-search" role="search">
+                <label htmlFor={`${searchId}-input`} className="sr-only">Buscar repositorios locales</label>
+                <span className="sidebar-search-icon" aria-hidden="true">⌕</span>
+                <input
+                  ref={searchInputRef}
+                  id={`${searchId}-input`}
+                  className="sidebar-search-input"
+                  type="search"
+                  value={repoQuery}
+                  placeholder="Buscar repositorio…"
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-describedby={isFiltering ? `${searchId}-count` : undefined}
+                  onChange={(e) => updateRepoQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape' && repoQuery) {
+                      e.preventDefault()
+                      clearRepoQuery()
+                    }
+                  }}
+                />
+                {repoQuery && (
+                  <button
+                    type="button"
+                    className="sidebar-search-clear"
+                    aria-label="Limpiar búsqueda"
+                    title="Limpiar búsqueda (Esc)"
+                    onClick={clearRepoQuery}
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            )}
+            {isFiltering && repos.length > 0 && (
+              <div id={`${searchId}-count`} className="sidebar-search-count" aria-live="polite">
+                {visibleRepos.length} de {repos.length}
+              </div>
+            )}
           </div>
-        ) : (
-          repos.map((repo) => (
+
+          {repos.length === 0 ? (
+            <div style={{ padding: '12px', fontSize: 12, color: 'var(--sidebar-muted)', textAlign: 'center', lineHeight: 1.5 }}>
+              Sin repositorios locales.{'\n'}Explora el servidor para clonar.
+            </div>
+          ) : visibleRepos.length === 0 ? (
+            <div className="sidebar-search-empty" role="status">
+              <div>Ningún repositorio coincide con «{repoQuery.trim()}».</div>
+              <button type="button" className="sidebar-search-empty-btn" onClick={clearRepoQuery}>
+                Limpiar búsqueda
+              </button>
+            </div>
+          ) : (
+          visibleRepos.map((repo) => (
             <div
               key={repo.path}
               className={`sidebar-item sidebar-item-with-menu ${selectedRepo?.path === repo.path ? 'active' : ''}`}
@@ -118,10 +175,15 @@ export default function Sidebar({
               <div className="sidebar-item-icon">📁</div>
               <div className="sidebar-item-info">
                 <div className="sidebar-item-name">{repo.name}</div>
-                <div className="sidebar-item-sub">r{repo.revision} · {timeAgo(repo.lastUpdated)}</div>
+                <div
+                  className="sidebar-item-sub"
+                  title={repo.metadataState === 'error' ? repo.metadataError : undefined}
+                >
+                  {describeRepoMeta(repo)}
+                </div>
               </div>
-              {repo.changesCount > 0 && (
-                <span className="sidebar-badge">{repo.changesCount}</span>
+              {repoChangesBadge(repo) !== null && (
+                <span className="sidebar-badge">{repoChangesBadge(repo)}</span>
               )}
 
               {/* Options button */}
@@ -178,7 +240,8 @@ export default function Sidebar({
               )}
             </div>
           ))
-        )}
+          )}
+        </div>
 
         <div className="sidebar-section-title" style={{ marginTop: 12 }}>
           Repositorios remotos

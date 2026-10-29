@@ -1,9 +1,12 @@
 {
   "name": "artisvn",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "description": "SVN Desktop Client - Cliente SVN estilo GitHub Desktop",
   "type": "module",
   "main": "./out/main/index.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "dev": "node scripts/run-electron-vite.mjs dev",
     "build:mcp-bridge": "node scripts/build-mcp-bridge.mjs --sea",
@@ -11,6 +14,8 @@
     "build": "node scripts/bundle-svn.mjs && electron-vite build && npm run build:mcp-bridge",
     "start": "node scripts/run-electron-vite.mjs preview",
     "test": "tsx --test tests/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "check": "npm run typecheck && npm test",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder",
     "release": "npm run build"
@@ -33,7 +38,7 @@
     "@types/xml2js": "^0.4.14",
     "@vitejs/plugin-react": "^4.3.0",
     "cross-env": "^7.0.3",
-    "electron": "^32.0.0",
+    "electron": "44.10.0",
     "electron-builder": "^24.13.0",
     "electron-vite": "^5.0.0",
     "postject": "^1.0.0-alpha.6",
@@ -139,6 +144,10 @@
         "provider": "generic",
         "url": "https://storage.googleapis.com/artictools-releases/artisvn/releases"
       }
+    ],
+    "files": [
+      "out/**/*",
+      "package.json"
     ]
   }
 }

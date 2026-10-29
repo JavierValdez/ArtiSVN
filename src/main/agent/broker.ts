@@ -1,7 +1,8 @@
+import { StringDecoder } from 'node:string_decoder'
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { existsSync, rmSync } from 'node:fs'
 import { connect, createServer, Socket, Server } from 'node:net'
-import { AgentSession, BrokerHello, BrokerHelloResponse, BrokerProgress, BrokerRequest, BrokerResponse } from './protocol'
+import { AgentSession, BrokerHello, BrokerHelloResponse, BrokerProgress, BrokerRequest, BrokerRequestContext, BrokerResponse } from './protocol'
 
 export interface BrokerServerOptions {
   endpoint: string
@@ -9,7 +10,8 @@ export interface BrokerServerOptions {
   handleRequest: (
     session: AgentSession,
     request: BrokerRequest,
-    emitProgress: (progress: unknown) => void
+    emitProgress: (progress: unknown) => void,
+    context: BrokerRequestContext
   ) => Promise<unknown>
   onSessionConnected?: (session: AgentSession) => void
   onSessionDisconnected?: (session: AgentSession) => void
@@ -100,39 +102,59 @@ export class AgentBrokerServer {
 
   private accept(socket: Socket): void {
     let buffer = ''
+    const decoder = new StringDecoder('utf8')
     let authenticatedSession: AgentSession | null = null
-
+    const active = new Map<string, AbortController>()
     const send = (payload: BrokerHelloResponse | BrokerResponse | BrokerProgress) => {
-      socket.write(`${JSON.stringify(payload)}\n`)
+      if (!socket.destroyed && socket.writable) socket.write(`${JSON.stringify(payload)}\n`)
+    }
+    const dispatch = (session: AgentSession, request: BrokerRequest) => {
+      if (active.has(request.id) || active.size >= 32) {
+        send({ id: request.id, ok: false, error: 'Demasiadas solicitudes MCP pendientes o identificador duplicado' })
+        return
+      }
+      const controller = new AbortController()
+      active.set(request.id, controller)
+      // Do not await inside the frame parser: a cancel in the same chunk must
+      // be consumed even while the previous request is waiting on SVN.
+      void (async () => {
+        try {
+          const result = await this.options.handleRequest(session, request, (progress) => {
+            if (!controller.signal.aborted) send({ type: 'progress', requestId: request.id, progress })
+          }, { signal: controller.signal })
+          if (!controller.signal.aborted) send({ id: request.id, ok: true, result })
+        } catch (error) {
+          if (!controller.signal.aborted) send({
+            id: request.id, ok: false,
+            error: error instanceof Error ? error.message : 'Error interno del broker'
+          })
+        } finally {
+          if (active.get(request.id) === controller) active.delete(request.id)
+        }
+      })()
     }
 
-    socket.on('data', async (chunk) => {
-      buffer += chunk.toString('utf-8')
+    socket.on('data', (chunk) => {
+      buffer += decoder.write(chunk)
       while (buffer.includes('\n')) {
         const newlineIndex = buffer.indexOf('\n')
         const raw = buffer.slice(0, newlineIndex)
         buffer = buffer.slice(newlineIndex + 1)
         if (!raw.trim()) continue
-
         let message: unknown
-        try {
-          message = JSON.parse(raw)
-        } catch {
-          socket.destroy()
-          return
-        }
+        try { message = JSON.parse(raw) }
+        catch { socket.destroy(); return }
+        if (!message || typeof message !== 'object') { socket.destroy(); return }
 
         if (!authenticatedSession) {
           const hello = message as BrokerHello
-          if (hello?.type !== 'hello' || !safeTokenEquals(this.options.getToken(), String(hello.token || ''))) {
+          if (hello.type !== 'hello' || !safeTokenEquals(this.options.getToken(), String(hello.token || ''))) {
             send({ type: 'hello', ok: false, error: 'Token MCP inválido' })
             socket.destroy()
             return
           }
-
           authenticatedSession = {
-            id: randomUUID(),
-            clientId: String(hello.clientId || randomUUID()),
+            id: randomUUID(), clientId: String(hello.clientId || randomUUID()),
             clientName: String(hello.clientName || 'MCP client'),
             clientVersion: hello.clientVersion ? String(hello.clientVersion) : undefined,
             connectedAt: new Date().toISOString()
@@ -142,29 +164,23 @@ export class AgentBrokerServer {
           this.options.onSessionConnected?.(authenticatedSession)
           continue
         }
-
+        const frame = message as Record<string, unknown>
+        if (frame.type === 'cancel') {
+          if (typeof frame.requestId === 'string') active.get(frame.requestId)?.abort()
+          continue
+        }
         const request = message as BrokerRequest
-        if (!request?.id || !request?.method) {
+        if (typeof request.id !== 'string' || !request.id || typeof request.method !== 'string' || !request.method) {
           socket.destroy()
           return
         }
-
-        try {
-          const result = await this.options.handleRequest(authenticatedSession, request, (progress) => {
-            send({ type: 'progress', requestId: request.id, progress })
-          })
-          send({ id: request.id, ok: true, result })
-        } catch (error) {
-          send({
-            id: request.id,
-            ok: false,
-            error: error instanceof Error ? error.message : 'Error interno del broker'
-          })
-        }
+        dispatch(authenticatedSession, request)
       }
     })
-
+    socket.on('error', () => { /* close aborts the work and removes the session */ })
     socket.on('close', () => {
+      for (const controller of active.values()) controller.abort()
+      active.clear()
       if (!authenticatedSession) return
       this.sessions.delete(authenticatedSession.id)
       this.options.onSessionDisconnected?.(authenticatedSession)

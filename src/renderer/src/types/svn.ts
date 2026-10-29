@@ -46,13 +46,21 @@ export interface RemoteServer {
   active?: boolean
 }
 
+export type LocalRepoMetadataState = 'pending' | 'ready' | 'error'
+
 export interface LocalRepo {
+  id?: string
   name: string
   path: string
+  /** Empty while metadata is pending. */
   url: string
-  revision: number
-  lastUpdated: string
-  changesCount: number
+  /** null = unknown (pending/error), never a fake 0. */
+  revision: number | null
+  lastUpdated: string | null
+  changesCount: number | null
+  author?: string
+  metadataState?: LocalRepoMetadataState
+  metadataError?: string
 }
 
 export type EditorId = 'vscode' | 'vscode-insiders'
@@ -174,3 +182,9 @@ export interface AgentClientConfig {
   args: string[]
   env: Record<string, string>
 }
+
+/** Full file content exactly at a revision (`svn:revisionFileContent` / `svn:remoteRevisionFileContent`). */
+export type RevisionSnapshot =
+  | { kind: 'text'; path: string; revision: number; text: string; bytes: number; truncated: boolean; encoding: 'utf-8' | 'latin1' }
+  | { kind: 'binary'; path: string; revision: number; bytes: number; truncated: boolean }
+  | { kind: 'dir'; path: string; revision: number }

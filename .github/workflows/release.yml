@@ -37,9 +37,14 @@ jobs:
             exit 1
           fi
 
+  ci:
+    name: CI gate
+    needs: validate-tag
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: Build ${{ matrix.platform.name }}
-    needs: validate-tag
+    needs: [validate-tag, ci]
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 60
     strategy:
@@ -64,7 +69,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install Subversion on macOS

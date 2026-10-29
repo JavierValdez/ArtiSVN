@@ -1,10 +1,23 @@
 import { basename, isAbsolute, join, relative, resolve } from 'node:path'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { ensureRemotesSeeded, StoredRemote } from './store'
-import { getSvnSpawnContext, runSvn } from './svn-runtime'
-import { spawn } from 'node:child_process'
+import { createHash, randomBytes } from 'node:crypto'
+import { ensureRemotesSeeded, getCredentialsForOrigin, listCredentialOriginKeys, StoredRemote } from './store'
+import { runSvn, spawnSvn, terminateProcess, SvnCancelledError } from './svn-runtime'
 import { BASE_REPO_PATH } from './local-paths'
+import { discoverLocalRepos, type LocalRepoSummary } from './local-repos'
+import { createRepoMetadataService, type RepoInfoMetadata } from './local-repo-metadata'
+import { readFileBounded, resolvePhysicalRepoTarget } from './path-guard'
+import { credentialOriginKeyFromUrl } from './svn-policy'
+import { buildRevisionUrl, readRevisionSnapshot, type RevisionSnapshot } from './revision-snapshot'
+import {
+  runRemoteSearch,
+  type RemoteSearchResponse,
+  type RemoteSearchResult,
+  type SearchLimits,
+  type SearchProgress
+} from './remote-search-engine'
+import { createSvnSearchDeps } from './remote-search-svn'
 
 const _require = createRequire(import.meta.url)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -26,10 +39,9 @@ export {
 export type { TextResult } from './read-contract'
 import {
   buildHistoricalRemoteTarget,
-  buildRepoId,
   normalizeRelativePath,
+  normalizeRemoteRevision,
   normalizeRepoUrl,
-  resolveRepoRelativeTarget,
   type TextResult,
   truncateText,
   validateReadOnlyRemoteUrl
@@ -47,39 +59,25 @@ export interface LocalStatusChange {
   wcLocked: boolean
 }
 
-export interface LocalRepoSummary {
-  id: string
-  name: string
-  path: string
-  url: string
-  revision: number
-  lastUpdated: string
-  changesCount: number
-  author?: string
-}
+export type { LocalRepoSummary } from './local-repos'
 
-export interface SearchProgress {
-  searched: number
-  total: number
-  listingStats?: { dirs: number; entries: number }
-}
+export type {
+  RemoteSearchResponse,
+  RemoteSearchResult,
+  SearchLimits,
+  SearchProgress,
+  SearchStopReason
+} from './remote-search-engine'
+export { DEFAULT_SEARCH_LIMITS } from './remote-search-engine'
 
-export interface RemoteSearchResult {
-  path: string
-  name: string
-  kind: 'dir' | 'file' | 'revision'
-  matchType: 'name' | 'content' | 'comment'
-  entryUrl: string
-  revision?: number
-  revisionMessage?: string
-}
-
-export interface RemoteSearchResponse {
-  results: RemoteSearchResult[]
-  searched: number
-  total: number
-  truncated: boolean
-}
+/** Max bytes read from a local file for text preview / MCP content. */
+export const MAX_LOCAL_TEXT_BYTES = 2 * 1024 * 1024
+/** Max bytes read from `svn cat` for text preview / MCP content. */
+export const MAX_REMOTE_TEXT_BYTES = 2 * 1024 * 1024
+/** Max diff output kept. */
+export const MAX_DIFF_BYTES = 4 * 1024 * 1024
+/** Max file size for local blame. */
+export const MAX_BLAME_FILE_BYTES = 5 * 1024 * 1024
 
 async function parseXml(xml: string): Promise<any> {
   return parseStringPromise(xml, {
@@ -233,65 +231,59 @@ export function buildStatusChangesFromParsed(parsed: any, repoPath: string): Loc
   return Array.from(merged.values())
 }
 
-export async function listLocalRepos(): Promise<LocalRepoSummary[]> {
-  const results: LocalRepoSummary[] = []
-  if (!existsSync(BASE_REPO_PATH)) return results
+// ─── Local repositories: fast discovery + cached asynchronous metadata ─────
 
-  for (const entry of readdirSync(BASE_REPO_PATH)) {
-    const fullPath = join(BASE_REPO_PATH, entry)
-    try {
-      if (!statSync(fullPath).isDirectory()) continue
-      if (!existsSync(join(fullPath, '.svn'))) continue
-
-      try {
-        const { stdout } = await runSvn(['info', '--xml', fullPath])
-        const parsed = await parseXml(stdout)
-        const info = parsed.info?.entry
-        let changesCount = 0
-        try {
-          const { stdout: statusXml } = await runSvn(['status', '--xml', fullPath])
-          changesCount = buildStatusChangesFromParsed(await parseXml(statusXml), fullPath).length
-        } catch {
-          changesCount = 0
-        }
-
-        results.push({
-          id: buildRepoId(fullPath),
-          name: entry,
-          path: fullPath,
-          url: info?.url || '',
-          revision: parseInt(info?.$?.revision || '0'),
-          lastUpdated: info?.commit?.date || new Date().toISOString(),
-          changesCount,
-          author: info?.commit?.author || ''
-        })
-      } catch {
-        results.push({
-          id: buildRepoId(fullPath),
-          name: entry,
-          path: fullPath,
-          url: '',
-          revision: 0,
-          lastUpdated: new Date().toISOString(),
-          changesCount: 0
-        })
-      }
-    } catch {
-      // ignore invalid entries
-    }
+async function readRepoInfo(repoPath: string): Promise<RepoInfoMetadata> {
+  // `svn info` on a working-copy path is offline.
+  const { stdout } = await runSvn(['info', '--xml', repoPath], { skipAuth: true, timeoutMs: 15_000 })
+  const parsed = await parseXml(stdout)
+  const entry = parsed.info?.entry
+  if (!entry) throw new Error('svn info no devolvió metadatos')
+  const revision = Number.parseInt(String(entry?.$?.revision || ''), 10)
+  return {
+    url: String(entry?.url || ''),
+    revision: Number.isFinite(revision) ? revision : 0,
+    lastUpdated: entry?.commit?.date ? String(entry.commit.date) : null,
+    author: String(entry?.commit?.author || '')
   }
-  return results
 }
 
-export async function resolveLocalRepo(repoId: string): Promise<LocalRepoSummary> {
-  const repo = (await listLocalRepos()).find((candidate) => candidate.id === repoId)
+async function countRepoChanges(repoPath: string): Promise<number> {
+  // Local status only (no `-u`), so no network access is needed.
+  const { stdout } = await runSvn(['status', '--xml', repoPath], { skipAuth: true, timeoutMs: 30_000 })
+  return buildStatusChangesFromParsed(await parseXml(stdout), repoPath).length
+}
+
+export const repoMetadata = createRepoMetadataService({
+  runner: { readInfo: readRepoInfo, countChanges: countRepoChanges },
+  concurrency: 3
+})
+
+/** Fast list for startup: discovered repos merged with cached metadata (never blocks on SVN). */
+export async function listLocalRepos(): Promise<LocalRepoSummary[]> {
+  return discoverLocalRepos(BASE_REPO_PATH).map((repo) => repoMetadata.merge(repo))
+}
+
+/** Lazily enriched list (used by MCP and background refresh). */
+export async function listLocalReposEnriched(options: {
+  includeStatus?: boolean
+  onUpdate?: (repo: LocalRepoSummary) => void
+} = {}): Promise<LocalRepoSummary[]> {
+  return repoMetadata.enrichAll(discoverLocalRepos(BASE_REPO_PATH), options)
+}
+
+export async function resolveLocalRepo(
+  repoId: string,
+  options: { includeStatus?: boolean } = {}
+): Promise<LocalRepoSummary> {
+  const repo = discoverLocalRepos(BASE_REPO_PATH).find((candidate) => candidate.id === repoId)
   if (!repo) throw new Error('Repositorio local no encontrado')
-  return repo
+  return repoMetadata.enrich(repo, { includeStatus: options.includeStatus ?? false })
 }
 
 export async function getLocalRepoUrlIndex(): Promise<Map<string, string>> {
   const index = new Map<string, string>()
-  for (const repo of await listLocalRepos()) {
+  for (const repo of await listLocalReposEnriched({ includeStatus: false })) {
     const normalized = normalizeRepoUrl(repo.url)
     if (normalized) index.set(normalized, repo.path)
   }
@@ -335,70 +327,26 @@ export async function listRemote(url: string, revision?: number): Promise<any[]>
   })
 }
 
-const BINARY_EXTENSIONS = new Set([
-  'png', 'jpg', 'jpeg', 'gif', 'bmp', 'ico', 'webp', 'tiff', 'psd',
-  'jar', 'war', 'ear', 'zip', 'tar', 'gz', 'bz2', '7z', 'rar',
-  'class', 'dll', 'so', 'dylib', 'exe', 'obj', 'o', 'a',
-  'mp4', 'mp3', 'avi', 'mov', 'mkv', 'wav', 'flac', 'ogg',
-  'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
-  'db', 'sqlite', 'bin', 'dat', 'dump',
-  'ttf', 'woff', 'woff2', 'eot'
-])
+// ─── Remote search (engine in remote-search-engine.ts) ─────────────────────
 
-async function runConcurrent(tasks: Array<() => Promise<void>>, concurrency: number): Promise<void> {
-  let nextIndex = 0
-  const worker = async () => {
-    while (nextIndex < tasks.length) {
-      const current = nextIndex++
-      await tasks[current]()
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, worker))
-}
+const SEARCH_IDENTITY_SALT = randomBytes(32)
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-function catSearchFile(fileUrl: string, query: string, revision?: number): Promise<boolean> {
-  return new Promise((resolvePromise) => {
-    const { bin, env, authArgs } = getSvnSpawnContext()
-    const target = buildHistoricalRemoteTarget(fileUrl, revision)
-    const proc = spawn(bin, ['cat', ...target.revisionArgs, target.targetUrl, ...authArgs], { env })
-    let buffer = ''
-    let settled = false
-    const finish = (result: boolean) => {
-      if (settled) return
-      settled = true
-      resolvePromise(result)
-    }
-    const timeoutId = setTimeout(() => {
-      proc.kill('SIGTERM')
-      finish(false)
-    }, 30000)
-
-    proc.stdout.on('data', (chunk: Buffer) => {
-      if (settled) return
-      buffer += chunk.toString('utf-8')
-      if (buffer.toLowerCase().includes(query)) {
-        clearTimeout(timeoutId)
-        proc.kill('SIGTERM')
-        finish(true)
-        return
-      }
-      if (buffer.length > 512 * 1024) {
-        buffer = buffer.slice(-(query.length + 16))
-      }
-    })
-    proc.on('close', () => {
-      clearTimeout(timeoutId)
-      finish(false)
-    })
-    proc.on('error', () => {
-      clearTimeout(timeoutId)
-      finish(false)
-    })
-  })
+/**
+ * Opaque, per-process identity of the credentials bound to the URL's origin.
+ * Partitions the in-memory search cache so a different user/password on the
+ * same origin never reuses another account's tree. Never logged or returned.
+ */
+function searchCredentialIdentity(url: string): string {
+  const originKey = credentialOriginKeyFromUrl(url) || 'no-origin'
+  const creds = getCredentialsForOrigin(originKey)
+  return createHash('sha256')
+    .update(SEARCH_IDENTITY_SALT)
+    .update(originKey)
+    .update('\0')
+    .update(creds?.username || '')
+    .update('\0')
+    .update(creds?.password || '')
+    .digest('hex')
 }
 
 export async function searchRemote(
@@ -410,155 +358,48 @@ export async function searchRemote(
     onProgress?: (progress: SearchProgress) => void
     onResult?: (result: RemoteSearchResult) => void
     revision?: number
+    signal?: AbortSignal
+    limits?: Partial<SearchLimits>
   } = {}
 ): Promise<RemoteSearchResponse> {
   const target = buildHistoricalRemoteTarget(url, options.revision)
-  const q = String(query || '').trim().toLowerCase()
-  if (!q) return { results: [], searched: 0, total: 0, truncated: false }
-
-  type SearchEntry = { path: string; name: string; kind: 'dir' | 'file'; entryUrl: string }
-  const baseUrl = normalizeRepoUrl(target.safeUrl)
-  const allEntries: SearchEntry[] = []
-  const dirQueue: string[] = [baseUrl]
-  let processedDirs = 0
-  const listBatch = 5
-
-  while (dirQueue.length > 0) {
-    const batch = dirQueue.splice(0, listBatch)
-    const stdouts = await Promise.all(batch.map(async (dirUrl) => {
-      try {
-        const dirTarget = buildHistoricalRemoteTarget(dirUrl, target.revision)
-        const { stdout } = await runSvn(
-          ['list', '--xml', ...dirTarget.revisionArgs, dirTarget.targetUrl],
-          { timeoutMs: 30000 }
-        )
-        return { dirUrl, stdout }
-      } catch {
-        return { dirUrl, stdout: null }
-      }
-    }))
-    processedDirs += batch.length
-
-    for (const { dirUrl, stdout } of stdouts) {
-      if (!stdout) continue
-      const parsed = await parseXml(stdout)
-      const rawList = parsed.lists?.list
-      const listArr = Array.isArray(rawList) ? rawList : rawList ? [rawList] : []
-      for (const list of listArr) {
-        const listPath = normalizeRepoUrl(dirUrl)
-        const entries = list.entry
-        if (!entries) continue
-        const arr = Array.isArray(entries) ? entries : [entries]
-        for (const entry of arr) {
-          const rawName = entry.name?._?.trim() || (typeof entry.name === 'string' ? entry.name : '') || ''
-          const name = rawName.replace(/\/$/, '')
-          if (!name) continue
-          const kind: 'dir' | 'file' = entry.$?.kind === 'dir' ? 'dir' : 'file'
-          const entryUrl = `${listPath}/${name}`
-          const relativePath = entryUrl.replace(new RegExp(`^${escapeRegExp(baseUrl)}/?`), '')
-          allEntries.push({ path: relativePath, name, kind, entryUrl })
-          if (kind === 'dir') dirQueue.push(entryUrl)
-        }
-      }
-    }
-
-    options.onProgress?.({
-      searched: 0,
-      total: 0,
-      listingStats: { dirs: processedDirs, entries: allEntries.length }
-    })
-  }
-
-  const maxResults = Math.max(1, Math.min(500, options.maxResults ?? 200))
-  const results: RemoteSearchResult[] = []
-  let truncated = false
-  const pushResult = (result: RemoteSearchResult) => {
-    if (results.length < maxResults) {
-      results.push(result)
-      options.onResult?.(result)
-      return
-    }
-    truncated = true
-  }
-
-  const nameResults = allEntries
-    .filter((entry) => entry.name.toLowerCase().includes(q))
-    .map((entry) => ({ ...entry, matchType: 'name' as const }))
-  for (const result of nameResults) pushResult(result)
-
-  try {
-    const logArgs = ['log', '--xml', '--limit', '500']
-    if (target.revision) logArgs.push('-r', `${target.revision}:1`)
-    logArgs.push(target.targetUrl)
-    const { stdout } = await runSvn(logArgs, { timeoutMs: 120000 })
-    const entries = parseLogEntries(await parseXml(stdout))
-    for (const entry of entries) {
-      if (entry.message && entry.message.toLowerCase().includes(q)) {
-        pushResult({
-          path: entry.message.length > 90 ? `${entry.message.slice(0, 90)}...` : entry.message,
-          name: `r${entry.revision}`,
-          kind: 'revision',
-          matchType: 'comment',
-          entryUrl: baseUrl,
-          revision: entry.revision,
-          revisionMessage: entry.message
-        })
-      }
-    }
-  } catch {
-    // continue with name/content results
-  }
-
-  if (!deepSearch) {
-    return {
-      results,
-      searched: 0,
-      total: 0,
-      truncated
-    }
-  }
-
-  const nameResultPaths = new Set(nameResults.map((result) => result.path))
-  const fileEntries = allEntries.filter((entry) => (
-    entry.kind === 'file'
-    && !nameResultPaths.has(entry.path)
-    && !BINARY_EXTENSIONS.has((entry.name.split('.').pop() || '').toLowerCase())
-  ))
-  let searched = 0
-  const total = fileEntries.length
-  options.onProgress?.({ searched: 0, total })
-
-  await runConcurrent(fileEntries.map((entry) => async () => {
-    const hasMatch = await catSearchFile(entry.entryUrl, q, target.revision)
-    searched += 1
-    if (hasMatch) pushResult({ ...entry, matchType: 'content' })
-    options.onProgress?.({ searched, total })
-  }), 8)
-
-  return {
-    results,
-    searched,
-    total,
-    truncated
-  }
+  // spawnSvn keeps the password on stdin, per-origin credentials and TLS policy.
+  const deps = createSvnSearchDeps((args) => spawnSvn(args), searchCredentialIdentity)
+  return runRemoteSearch({
+    url: target.safeUrl,
+    query,
+    deepSearch,
+    revision: target.revision,
+    maxResults: options.maxResults,
+    limits: options.limits,
+    signal: options.signal,
+    onProgress: options.onProgress,
+    onResult: options.onResult
+  }, deps)
 }
 
 export async function localStatus(repoPath: string): Promise<LocalStatusChange[]> {
-  const { stdout } = await runSvn(['status', '--xml'], { cwd: repoPath })
+  const { stdout } = await runSvn(['status', '--xml'], { cwd: repoPath, timeoutMs: 120_000 })
   return buildStatusChangesFromParsed(await parseXml(stdout), repoPath)
 }
 
 export async function localDiff(repoPath: string, filePath: string): Promise<TextResult> {
-  const { relativePath } = resolveRepoRelativeTarget(repoPath, filePath)
+  const { relativePath } = resolvePhysicalRepoTarget(repoPath, filePath, { allowSymlinkLeaf: true })
+  const target = relativePath || '.'
   try {
-    const { stdout } = await runSvn(['diff', relativePath], { cwd: repoPath })
-    return truncateText(stdout || '(sin cambios)')
+    const { stdout, truncated } = await runSvn(['diff', '--', target], {
+      cwd: repoPath,
+      timeoutMs: 120_000,
+      maxStdoutBytes: MAX_DIFF_BYTES
+    })
+    const result = truncateText(stdout || '(sin cambios)')
+    return truncated ? { ...result, truncated: true } : result
   } catch {
     try {
-      const { stdout } = await runSvn(['status', '--xml', relativePath], { cwd: repoPath })
+      const { stdout } = await runSvn(['status', '--xml', '--', target], { cwd: repoPath, timeoutMs: 30_000 })
       const parsed = await parseXml(stdout)
-      const target = parsed.status?.target
-      const entry = Array.isArray(target?.entry) ? target.entry[0] : target?.entry
+      const statusTarget = parsed.status?.target
+      const entry = Array.isArray(statusTarget?.entry) ? statusTarget.entry[0] : statusTarget?.entry
       if (entry?.['wc-status']?.$?.item === 'unversioned') {
         return truncateText('(archivo sin versionar: SVN no genera diff hasta hacer add/commit)')
       }
@@ -569,12 +410,28 @@ export async function localDiff(repoPath: string, filePath: string): Promise<Tex
   }
 }
 
+/** Reads local text content with physical containment and a byte cap before reading. */
 export function localFileContent(repoPath: string, filePath: string): TextResult {
-  const { targetAbs } = resolveRepoRelativeTarget(repoPath, filePath)
-  if (!existsSync(targetAbs)) return truncateText('(archivo no encontrado)')
-  if (!statSync(targetAbs).isFile()) return truncateText('(no es un archivo regular)')
+  let physical
   try {
-    return truncateText(readFileSync(targetAbs, 'utf-8') || '(archivo vacío)')
+    physical = resolvePhysicalRepoTarget(repoPath, filePath)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+    if (/fuera del repositorio/i.test(message)) throw error
+    return truncateText('(archivo no encontrado)')
+  }
+  if (!physical.exists) return truncateText('(archivo no encontrado)')
+  try {
+    if (!statSync(physical.targetReal).isFile()) return truncateText('(no es un archivo regular)')
+    const read = readFileBounded(physical.targetReal, MAX_LOCAL_TEXT_BYTES)
+    const text = read.buffer.toString('utf-8')
+    const result = truncateText(text || '(archivo vacío)')
+    if (!read.truncated) return result
+    return {
+      text: `${result.text}\n\n[... contenido truncado: ${read.size} bytes en disco ...]`,
+      truncated: true,
+      originalLength: read.size
+    }
   } catch {
     return truncateText('(no se pudo leer el contenido del archivo)')
   }
@@ -589,23 +446,25 @@ export async function localLog(repoPath: string, limit = 50, fromRevision?: numb
   } else {
     args.push('-r', 'HEAD:1')
   }
-  const { stdout } = await runSvn(args, { cwd: repoPath })
+  const { stdout } = await runSvn(args, { cwd: repoPath, timeoutMs: 120_000 })
   return parseLogEntries(await parseXml(stdout))
 }
 
 export async function localBlame(repoPath: string, filePath: string): Promise<any[]> {
-  const { targetAbs, relativePath } = resolveRepoRelativeTarget(repoPath, filePath)
-  if (!existsSync(targetAbs)) throw new Error('El archivo no existe')
-  if (!statSync(targetAbs).isFile()) throw new Error('Blame solo está disponible para archivos')
+  const physical = resolvePhysicalRepoTarget(repoPath, filePath, { mustExist: true })
+  if (!statSync(physical.targetReal).isFile()) throw new Error('Blame solo está disponible para archivos')
+  const read = readFileBounded(physical.targetReal, MAX_BLAME_FILE_BYTES)
+  if (read.truncated) throw new Error('El archivo es demasiado grande para blame')
 
-  const { stdout } = await runSvn(['blame', '--xml', relativePath], {
+  const { stdout } = await runSvn(['blame', '--xml', '--', physical.relativePath], {
     cwd: repoPath,
-    timeoutMs: 60000
+    timeoutMs: 60000,
+    maxStdoutBytes: 64 * 1024 * 1024
   })
   const parsed = await parseXml(stdout)
   const entries = parsed.blame?.target?.entry
   const blameEntries = entries ? (Array.isArray(entries) ? entries : [entries]) : []
-  const normalizedContent = readFileSync(targetAbs, 'utf-8').replace(/\r\n/g, '\n')
+  const normalizedContent = read.buffer.toString('utf-8').replace(/\r\n/g, '\n')
   const lines = normalizedContent.split('\n')
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
   if (lines.length === 0) lines.push('')
@@ -622,30 +481,58 @@ export async function localBlame(repoPath: string, filePath: string): Promise<an
   })
 }
 
-export async function localRevisionFileDiff(
-  repoPath: string,
-  revision: number,
-  svnPath: string
-): Promise<TextResult> {
-  const { stdout: infoXml } = await runSvn(['info', '--xml'], { cwd: repoPath })
-  const parsed = await parseXml(infoXml)
-  const rootUrl = parsed?.info?.entry?.repository?.root || ''
-  if (!rootUrl) throw new Error('No se pudo obtener la URL raíz del repositorio')
-  const fileUrl = rootUrl + svnPath
+export { normalizeRepoScopedSvnPath } from './revision-snapshot'
+export type { RevisionSnapshot } from './revision-snapshot'
+
+async function diffAtRevision(rootUrl: string, svnPath: string, revision: number): Promise<TextResult> {
+  const safeRevision = normalizeRemoteRevision(revision)
+  if (!safeRevision) throw new Error('La revisión es requerida')
+  // Pegged at the revision itself: works even if the file was renamed/deleted later,
+  // and keeps names with spaces or "@" unambiguous.
+  const pegUrl = buildRevisionUrl(rootUrl, svnPath, safeRevision)
   try {
-    const { stdout } = await runSvn(['diff', `-c${revision}`, '-x', '-U 9999', fileUrl])
-    return truncateText(stdout || '(sin cambios en esta revisión)')
+    const { stdout, truncated } = await runSvn(['diff', `-c${safeRevision}`, '-x', '-U 9999', '--', pegUrl], {
+      timeoutMs: 120_000,
+      maxStdoutBytes: MAX_DIFF_BYTES
+    })
+    const result = truncateText(stdout || '(sin cambios en esta revisión)')
+    return truncated ? { ...result, truncated: true } : result
   } catch (error) {
     const message = error instanceof Error ? error.message : ''
     if (message.includes('was added') || message.includes('E195020')) {
-      return truncateText(`(archivo añadido en r${revision})`)
+      return truncateText(`(archivo añadido en r${safeRevision})`)
     }
     throw error
   }
 }
 
+async function workingCopyRootUrl(repoPath: string): Promise<string> {
+  // Offline: read from the working copy metadata.
+  const { stdout: infoXml } = await runSvn(['info', '--xml'], { cwd: repoPath, timeoutMs: 15_000 })
+  const parsed = await parseXml(infoXml)
+  const rootUrl = parsed?.info?.entry?.repository?.root || ''
+  if (!rootUrl) throw new Error('No se pudo obtener la URL raíz del repositorio')
+  return rootUrl
+}
+
+async function remoteRootUrl(baseUrl: string): Promise<string> {
+  const { stdout: infoXml } = await runSvn(['info', '--xml', '--', validateReadOnlyRemoteUrl(baseUrl)], { timeoutMs: 30_000 })
+  const parsed = await parseXml(infoXml)
+  const rootUrl = parsed?.info?.entry?.repository?.root || ''
+  if (!rootUrl) throw new Error('No se pudo obtener la URL raíz del repositorio')
+  return rootUrl
+}
+
+export async function localRevisionFileDiff(
+  repoPath: string,
+  revision: number,
+  svnPath: string
+): Promise<TextResult> {
+  return diffAtRevision(await workingCopyRootUrl(repoPath), svnPath, revision)
+}
+
 export async function svnInfo(path: string): Promise<any> {
-  const { stdout } = await runSvn(['info', '--xml', path])
+  const { stdout } = await runSvn(['info', '--xml', path], { timeoutMs: 30_000 })
   const parsed = await parseXml(stdout)
   const entry = parsed.info?.entry
   return {
@@ -669,20 +556,25 @@ export async function remoteLog(url: string, limit = 50, revision?: number): Pro
 
 export async function remoteFileContent(url: string, revision?: number): Promise<TextResult> {
   const target = buildHistoricalRemoteTarget(url, revision)
-  const { stdout } = await runSvn(['cat', ...target.revisionArgs, target.targetUrl])
-  return truncateText(stdout)
+  const { stdout, truncated } = await runSvn(['cat', ...target.revisionArgs, target.targetUrl], {
+    timeoutMs: 120_000,
+    maxStdoutBytes: MAX_REMOTE_TEXT_BYTES
+  })
+  const result = truncateText(stdout)
+  if (!truncated) return result
+  return { text: `${result.text}\n\n[... contenido truncado ...]`, truncated: true, originalLength: result.originalLength }
 }
 
 export async function remoteRepoRoot(url: string, revision?: number): Promise<string | null> {
   const target = buildHistoricalRemoteTarget(url, revision)
-  const { stdout } = await runSvn(['info', '--xml', ...target.revisionArgs, target.targetUrl])
+  const { stdout } = await runSvn(['info', '--xml', ...target.revisionArgs, target.targetUrl], { timeoutMs: 30_000 })
   const parsed = await parseXml(stdout)
   return (parsed?.info?.entry?.repository?.root as string) || null
 }
 
 export async function remoteInfo(url: string, revision?: number): Promise<any> {
   const target = buildHistoricalRemoteTarget(url, revision)
-  const { stdout } = await runSvn(['info', '--xml', ...target.revisionArgs, target.targetUrl])
+  const { stdout } = await runSvn(['info', '--xml', ...target.revisionArgs, target.targetUrl], { timeoutMs: 30_000 })
   const parsed = await parseXml(stdout)
   const entry = parsed.info?.entry
   return {
@@ -695,21 +587,96 @@ export async function remoteInfo(url: string, revision?: number): Promise<any> {
 }
 
 export async function remoteRevisionDiff(baseUrl: string, svnPath: string, revision: number): Promise<TextResult> {
-  const { stdout: infoXml } = await runSvn(['info', '--xml', validateReadOnlyRemoteUrl(baseUrl)])
-  const parsed = await parseXml(infoXml)
-  const rootUrl = parsed?.info?.entry?.repository?.root || ''
-  if (!rootUrl) throw new Error('No se pudo obtener la URL raíz del repositorio')
-  const fileUrl = rootUrl + svnPath
-  try {
-    const { stdout } = await runSvn(['diff', `-c${revision}`, '-x', '-U 9999', fileUrl])
-    return truncateText(stdout || '(sin cambios en esta revisión)')
-  } catch (error) {
-    const message = error instanceof Error ? error.message : ''
-    if (message.includes('was added') || message.includes('E195020')) {
-      return truncateText(`(archivo añadido en r${revision})`)
+  return diffAtRevision(await remoteRootUrl(baseUrl), svnPath, revision)
+}
+
+// ─── Full file snapshot at a revision (read-only, byte-capped) ─────────────
+
+const SNAPSHOT_TIMEOUT_MS = 120_000
+
+/** `svn cat` into a Buffer (lossless for any encoding), stopping after `maxBytes`. */
+function catBytes(pegUrl: string, maxBytes: number): Promise<{ buffer: Buffer; truncated: boolean }> {
+  return new Promise((resolvePromise, reject) => {
+    let proc: ReturnType<typeof spawnSvn>
+    try {
+      proc = spawnSvn(['cat', '--', pegUrl])
+    } catch (error) {
+      reject(error as Error)
+      return
     }
-    throw error
+    const chunks: Buffer[] = []
+    let size = 0
+    let truncated = false
+    let exited = false
+    let stderr = ''
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      terminateProcess(proc, () => exited)
+    }, SNAPSHOT_TIMEOUT_MS)
+
+    proc.stdout.on('data', (chunk: Buffer) => {
+      if (truncated) return
+      const room = maxBytes - size
+      if (chunk.length > room) {
+        chunks.push(chunk.subarray(0, Math.max(0, room)))
+        size = maxBytes
+        truncated = true
+        terminateProcess(proc, () => exited)
+        return
+      }
+      chunks.push(chunk)
+      size += chunk.length
+    })
+    proc.stderr.on('data', (chunk: Buffer) => {
+      if (stderr.length < 64 * 1024) stderr += chunk.toString()
+    })
+    proc.on('error', (error) => {
+      exited = true
+      clearTimeout(timer)
+      reject(error)
+    })
+    // Resolve only after the child has exited (no writes after we return).
+    proc.on('close', (code) => {
+      exited = true
+      clearTimeout(timer)
+      if (truncated) resolvePromise({ buffer: Buffer.concat(chunks), truncated: true })
+      else if (timedOut) reject(new Error(`Tiempo de espera agotado (${SNAPSHOT_TIMEOUT_MS / 1000}s) al leer el archivo`))
+      else if (code === 0) resolvePromise({ buffer: Buffer.concat(chunks), truncated: false })
+      else reject(new Error(stderr.trim() || `SVN exited with code ${code}`))
+    })
+  })
+}
+
+async function readNodeKind(pegUrl: string): Promise<'file' | 'dir'> {
+  const { stdout } = await runSvn(['info', '--show-item', 'kind', '--no-newline', '--', pegUrl], { timeoutMs: 30_000 })
+  return stdout.trim() === 'dir' ? 'dir' : 'file'
+}
+
+const snapshotDeps = { readKind: readNodeKind, readBytes: catBytes }
+
+/** Exact content of `svnPath` at `revision` for a local working copy's repository. */
+export async function localRevisionFileSnapshot(repoPath: string, revision: number, svnPath: string): Promise<RevisionSnapshot> {
+  return readRevisionSnapshot(await workingCopyRootUrl(repoPath), svnPath, revision, snapshotDeps)
+}
+
+/** Exact content of `svnPath` at `revision`, resolving the repository root from `baseUrl`. */
+export async function remoteRevisionFileSnapshot(baseUrl: string, svnPath: string, revision: number): Promise<RevisionSnapshot> {
+  return readRevisionSnapshot(await remoteRootUrl(baseUrl), svnPath, revision, snapshotDeps)
+}
+
+/**
+ * Origins an MCP client may target with a free `url`: those of configured
+ * remotes and of saved credentials. Anything else is rejected so an agent cannot
+ * make ArtiSVN contact arbitrary servers.
+ */
+export function getAllowedRemoteOriginKeys(): Set<string> {
+  const keys = new Set<string>(listCredentialOriginKeys())
+  for (const remote of ensureRemotesSeeded()) {
+    const key = credentialOriginKeyFromUrl(remote.url)
+    if (key) keys.add(key)
   }
+  return keys
 }
 
 export function resolveRemoteTarget(input: { remoteId?: string; url?: string }): string {
@@ -718,6 +685,15 @@ export function resolveRemoteTarget(input: { remoteId?: string; url?: string }):
     if (!remote) throw new Error('Repositorio remoto no encontrado')
     return remote.url
   }
-  if (input.url) return validateReadOnlyRemoteUrl(input.url)
+  if (input.url) {
+    const safeUrl = validateReadOnlyRemoteUrl(input.url)
+    const key = credentialOriginKeyFromUrl(safeUrl)
+    if (!key || !getAllowedRemoteOriginKeys().has(key)) {
+      throw new Error('La URL no pertenece a un servidor SVN configurado en ArtiSVN')
+    }
+    return safeUrl
+  }
   throw new Error('Se requiere remoteId o url')
 }
+
+export { SvnCancelledError }

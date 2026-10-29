@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+    tags-ignore:
+      - 'v*'
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Tests and types (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Electron 44 tooling (@electron/get) requires Node >= 22.12.
+          node-version: 22
+          cache: npm
+
+      - name: Install Subversion (integration tests)
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${RUNNER_OS}" in
+            Linux) sudo apt-get update -qq && sudo apt-get install -y -qq subversion ;;
+            macOS) brew install subversion ;;
+            Windows)
+              choco install sliksvn -y --no-progress
+              echo "C:\\Program Files\\SlikSvn\\bin" >> "$GITHUB_PATH" ;;
+          esac
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check (main/preload)
+        run: npx tsc -p tsconfig.node.json --noEmit
+
+      - name: Type check (renderer)
+        run: npx tsc -p tsconfig.web.json --noEmit
+
+      - name: Unit and integration tests
+        run: npm test
+
+      - name: Bundle renderer/main/preload
+        run: npx electron-vite build

@@ -2,17 +2,18 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 interface StoredCredentialsPayload {
   username?: string
-  password?: string
   serverUrl?: string
+  hasPassword?: boolean
 }
 
+// The main process never sends the password; keep only the public fields.
 function sanitizeCredentialsForRenderer(creds: StoredCredentialsPayload | null) {
   if (!creds) return null
 
   return {
     username: creds.username || '',
     serverUrl: creds.serverUrl || '',
-    hasPassword: Boolean(creds.password)
+    hasPassword: Boolean(creds.hasPassword)
   }
 }
 
@@ -49,16 +50,24 @@ const svnAPI = {
   listLocalRepos: () => ipcRenderer.invoke('repos:list'),
   getBasePath: () => ipcRenderer.invoke('repos:basePath'),
   deleteRepo: (repoPath: string) => ipcRenderer.invoke('repos:delete', repoPath),
+  onReposUpdated: (cb: (repo: any) => void) => {
+    const handler = (_: any, repo: any) => cb(repo)
+    ipcRenderer.on('repos:updated', handler)
+    return () => ipcRenderer.removeListener('repos:updated', handler)
+  },
 
   // Remote SVN
   listRemote: (url: string) => ipcRenderer.invoke('svn:list', url),
   searchRemote: (url: string, query: string, deepSearch: boolean) =>
     ipcRenderer.invoke('svn:searchRemote', url, query, deepSearch),
+  cancelSearch: () => ipcRenderer.invoke('svn:cancelSearch'),
   remoteLog: (url: string, limit?: number) => ipcRenderer.invoke('svn:remoteLog', url, limit),
   remoteFileContent: (url: string) => ipcRenderer.invoke('svn:cat', url),
   getRepoRoot: (url: string) => ipcRenderer.invoke('svn:getRepoRoot', url),
   remoteRevisionDiff: (baseUrl: string, svnPath: string, revision: number) =>
     ipcRenderer.invoke('svn:remoteRevisionDiff', baseUrl, svnPath, revision),
+  remoteRevisionFileContent: (baseUrl: string, svnPath: string, revision: number) =>
+    ipcRenderer.invoke('svn:remoteRevisionFileContent', baseUrl, svnPath, revision),
   remoteMkdir: (parentUrl: string, name: string, message?: string) =>
     ipcRenderer.invoke('svn:remoteMkdir', parentUrl, name, message),
   remoteCreateFile: (parentUrl: string, name: string, content?: string, message?: string) =>
@@ -72,6 +81,7 @@ const svnAPI = {
   getVersion: () => ipcRenderer.invoke('svn:version'),
   getBinPath: () => ipcRenderer.invoke('svn:getBinPath'),
   setBinPath: (binPath: string) => ipcRenderer.invoke('svn:setBinPath', binPath),
+  pickBinPath: () => ipcRenderer.invoke('svn:pickBinPath'),
 
   // Repo operations
   checkout: (url: string, targetName: string) =>
@@ -91,6 +101,8 @@ const svnAPI = {
     ipcRenderer.invoke('svn:getConflictContent', repoPath, filePath),
   revisionFileDiff: (repoPath: string, revision: number, svnPath: string) =>
     ipcRenderer.invoke('svn:revisionFileDiff', repoPath, revision, svnPath),
+  revisionFileContent: (repoPath: string, revision: number, svnPath: string) =>
+    ipcRenderer.invoke('svn:revisionFileContent', repoPath, revision, svnPath),
   restorePathAtRevision: (repoPath: string, revision: number, svnPath: string, action: 'A' | 'M' | 'D' | 'R') =>
     ipcRenderer.invoke('svn:restorePathAtRevision', repoPath, revision, svnPath, action),
   blame: (repoPath: string, filePath: string) => ipcRenderer.invoke('svn:blame', repoPath, filePath),
@@ -185,6 +197,7 @@ const agentIntegrationAPI = {
   getState: () => ipcRenderer.invoke('agentIntegration:getState'),
   setEnabled: (enabled: boolean) => ipcRenderer.invoke('agentIntegration:setEnabled', enabled),
   getClientConfig: () => ipcRenderer.invoke('agentIntegration:getClientConfig'),
+  copyClientConfig: () => ipcRenderer.invoke('agentIntegration:copyClientConfig'),
   regenerateToken: () => ipcRenderer.invoke('agentIntegration:regenerateToken'),
   getActivity: () => ipcRenderer.invoke('agentIntegration:getActivity'),
   clearActivity: () => ipcRenderer.invoke('agentIntegration:clearActivity'),

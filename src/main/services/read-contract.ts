@@ -46,7 +46,8 @@ export function resolveRepoRelativeTarget(repoPath: string, filePath: string): {
   const targetAbs = resolve(repoPath, filePath)
   const relativePath = relative(repoAbs, targetAbs)
 
-  if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+  // Segment-based check: "..foo" is a valid file name, ".." / "../x" escape.
+  if (isAbsolute(relativePath) || relativePath.split(/[\\/]/)[0] === '..') {
     throw new Error('Ruta fuera del repositorio')
   }
 

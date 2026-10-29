@@ -1,7 +1,8 @@
 import { useState } from 'react'
 
 interface Props {
-  onSave: (creds: { username: string; password: string; serverUrl: string }) => void
+  /** Resolves to null on success or to an error message (the dialog stays open). */
+  onSave: (creds: { username: string; password: string; serverUrl: string }) => Promise<string | null>
   onCancel: () => void
   initialServerUrl?: string
   authError?: boolean
@@ -13,6 +14,8 @@ export default function AuthDialog({ onSave, onCancel, initialServerUrl = '', au
   const [serverUrl, setServerUrl] = useState(initialServerUrl)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   const handleTest = async () => {
     setTesting(true)
@@ -31,15 +34,25 @@ export default function AuthDialog({ onSave, onCancel, initialServerUrl = '', au
     }
   }
 
-  const handleSave = () => {
-    if (!username.trim()) return
+  const handleSave = async () => {
+    if (!username.trim() || saving) return
 
-    const creds = { username: username.trim(), password, serverUrl: serverUrl.trim() }
-    void onSave(creds)
-
-    // Do not retain the SVN password in renderer component or parent state after handing it to IPC.
-    creds.password = ''
-    setPassword('')
+    setSaving(true)
+    setSaveError(null)
+    try {
+      const error = await onSave({ username: username.trim(), password, serverUrl: serverUrl.trim() })
+      if (error) {
+        // Keep the form open (and the typed password) so the user can correct it.
+        setSaveError(error)
+        return
+      }
+      // Success: the dialog is closed by the parent; drop the password from component state.
+      setPassword('')
+    } catch (err: any) {
+      setSaveError(err?.message || 'No se pudieron guardar las credenciales')
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -83,7 +96,7 @@ export default function AuthDialog({ onSave, onCancel, initialServerUrl = '', au
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="••••••••"
-            onKeyDown={(e) => { if (e.key === 'Enter') handleSave() }}
+            onKeyDown={(e) => { if (e.key === 'Enter') void handleSave() }}
           />
         </div>
 
@@ -100,6 +113,23 @@ export default function AuthDialog({ onSave, onCancel, initialServerUrl = '', au
           </div>
         )}
 
+        {saveError && (
+          <div
+            role="alert"
+            className="auth-save-error"
+            style={{
+              padding: '8px 12px',
+              borderRadius: 6,
+              background: '#ffebe9',
+              color: 'var(--danger)',
+              fontSize: 12,
+              marginBottom: 8
+            }}
+          >
+            {saveError}
+          </div>
+        )}
+
         <div className="dialog-actions">
           <button className="btn btn-ghost" onClick={handleTest} disabled={testing || !username || !serverUrl}>
             {testing ? 'Probando...' : 'Probar conexión'}
@@ -109,10 +139,10 @@ export default function AuthDialog({ onSave, onCancel, initialServerUrl = '', au
           </button>
           <button
             className="btn btn-primary"
-            onClick={handleSave}
-            disabled={!username.trim()}
+            onClick={() => void handleSave()}
+            disabled={!username.trim() || saving}
           >
-            Guardar
+            {saving ? 'Guardando...' : 'Guardar'}
           </button>
         </div>
       </div>

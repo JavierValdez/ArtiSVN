@@ -44,7 +44,8 @@ test('uses GitHub API and never contacts GCS when a compatible update exists', a
     return jsonResponse(githubRelease('3.0.0', [{
       name: 'ArtiSVN-Mac-3.0.0-Installer.dmg',
       browser_download_url: 'https://github.com/download/ArtiSVN.dmg',
-      size: 456
+      size: 456,
+      digest: `sha256:${'a'.repeat(64)}`
     }]))
   }
 
@@ -56,7 +57,46 @@ test('uses GitHub API and never contacts GCS when a compatible update exists', a
 
   assert.equal(release.source, 'github')
   assert.equal(release.downloadAsset?.name, 'ArtiSVN-Mac-3.0.0-Installer.dmg')
+  assert.equal(release.downloadAsset?.sha256, 'a'.repeat(64))
   assert.deepEqual(calls, [{ url: GITHUB_LATEST_RELEASE_URL, userAgent: 'ArtiSVN' }])
+})
+
+test('falls back to GCS (sha512 metadata) when the GitHub installer has no digest', async () => {
+  const calls: string[] = []
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input)
+    calls.push(url)
+    if (url === GITHUB_LATEST_RELEASE_URL) {
+      return jsonResponse(githubRelease('3.0.0', [{
+        name: 'ArtiSVN-Mac-3.0.0-Installer.dmg',
+        browser_download_url: 'https://github.com/download/ArtiSVN.dmg',
+        size: 456
+      }]))
+    }
+    return new Response(
+      'version: 3.0.0\nfiles:\n  - url: v3.0.0/ArtiSVN-Mac-3.0.0-Installer.dmg\n    sha512: c2hhNTEyLWZpeHR1cmU=\n    size: 456\npath: v3.0.0/ArtiSVN-Mac-3.0.0-Installer.dmg\nsha512: c2hhNTEyLWZpeHR1cmU=\n',
+      { status: 200 }
+    )
+  }
+  const release = await fetchLatestRelease({ currentVersion: '2.2.1', platform: 'darwin', fetchImpl, env: {} })
+  assert.equal(release.source, 'gcs')
+  assert.equal(release.downloadAsset?.sha512, 'c2hhNTEyLWZpeHR1cmU=')
+  assert.equal(release.downloadAsset?.size, 456)
+  assert.equal(calls.length, 2)
+})
+
+test('GitHub assets with http download URLs are ignored', async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    if (String(input) === GITHUB_LATEST_RELEASE_URL) {
+      return jsonResponse(githubRelease('3.0.0', [{
+        name: 'ArtiSVN-Mac-3.0.0-Installer.dmg',
+        browser_download_url: 'http://github.com/download/ArtiSVN.dmg',
+        digest: `sha256:${'b'.repeat(64)}`
+      }]))
+    }
+    return new Response('', { status: 503 })
+  }
+  await assert.rejects(fetchLatestRelease({ currentVersion: '2.2.1', platform: 'darwin', fetchImpl, env: {} }), /503/)
 })
 
 test('treats a valid GitHub no-update response as authoritative without GCS', async () => {

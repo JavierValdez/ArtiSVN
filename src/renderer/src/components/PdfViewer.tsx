@@ -31,7 +31,7 @@ export default function PdfViewer({ base64 }: Props) {
       bytes[i] = binary.charCodeAt(i)
     }
 
-    pdfjs.getDocument({ data: bytes }).promise
+    pdfjs.getDocument({ data: bytes, isEvalSupported: false }).promise
       .then((doc) => {
         if (cancelled) {
           doc.destroy()

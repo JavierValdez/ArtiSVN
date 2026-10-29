@@ -1,15 +1,15 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
-import { createWriteStream, promises as fs } from 'node:fs'
+import { app, BrowserWindow, shell } from 'electron'
+import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { Readable, Transform } from 'node:stream'
-import { pipeline } from 'node:stream/promises'
-import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
 import {
   compareVersions,
   fetchLatestRelease as fetchLatestReleaseFromSource,
+  getAllowedUpdateHosts,
   normalizeVersion,
   type UpdateDownloadAsset
 } from './services/app-update-source'
+import { downloadVerifiedFile, getExpectedChecksum, verifyExistingDownload } from './services/update-download'
+import { handleTrusted } from './ipc/guard'
 
 type UpdateStage =
   | 'idle'
@@ -126,11 +126,8 @@ async function syncExistingDownload(version: string, asset: UpdateDownloadAsset)
   const targetPath = getDownloadTargetPath(asset)
 
   if (!(await fileExists(targetPath))) return false
-
-  if (typeof asset.size === 'number' && asset.size > 0) {
-    const stats = await fs.stat(targetPath)
-    if (stats.size !== asset.size) return false
-  }
+  // Same name and size is not enough: re-hash the existing file against the metadata checksum.
+  if (!(await verifyExistingDownload(targetPath, asset))) return false
 
   patchState({
     stage: 'downloaded',
@@ -144,27 +141,6 @@ async function syncExistingDownload(version: string, asset: UpdateDownloadAsset)
     error: null
   })
   return true
-}
-
-function createDownloadProgressStream(totalBytes: number): Transform {
-  let receivedBytes = 0
-
-  return new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      receivedBytes += chunk.length
-      const progressPercent = totalBytes > 0
-        ? Math.min(99, Math.round((receivedBytes / totalBytes) * 100))
-        : null
-
-      patchState({
-        stage: 'downloading',
-        progressPercent,
-        error: null
-      })
-
-      callback(null, chunk)
-    }
-  })
 }
 
 async function revealDownloadedInstaller(): Promise<boolean> {
@@ -300,7 +276,6 @@ async function downloadUpdate(): Promise<AppUpdateState> {
   const asset = latestDownloadAsset
   downloadInFlight = (async () => {
     const targetPath = getDownloadTargetPath(asset)
-    const tempPath = `${targetPath}.download`
 
     patchState({
       stage: 'downloading',
@@ -314,29 +289,22 @@ async function downloadUpdate(): Promise<AppUpdateState> {
     })
 
     try {
-      const response = await fetch(asset.url, {
-        headers: {
-          Accept: 'application/octet-stream',
-          'User-Agent': 'ArtiSVN'
-        },
-        redirect: 'follow'
-      })
-
-      if (!response.ok || !response.body) {
-        throw new Error(`La descarga falló con estado ${response.status}.`)
+      if (!getExpectedChecksum(asset)) {
+        throw new Error('La actualización no publica un checksum verificable; descárgala manualmente desde la página de releases.')
       }
-
-      const contentLength = Number(response.headers.get('content-length') ?? asset.size ?? 0)
-      const totalBytes = Number.isFinite(contentLength) ? contentLength : 0
-
-      await pipeline(
-        Readable.fromWeb(response.body as unknown as NodeReadableStream<Uint8Array>),
-        createDownloadProgressStream(totalBytes),
-        createWriteStream(tempPath)
-      )
-
-      await fs.rm(targetPath, { force: true })
-      await fs.rename(tempPath, targetPath)
+      let lastPercent = -1
+      await downloadVerifiedFile({
+        asset,
+        targetPath,
+        allowedHosts: getAllowedUpdateHosts(),
+        userAgent: 'ArtiSVN',
+        onProgress: (received, total) => {
+          const progressPercent = total > 0 ? Math.min(99, Math.round((received / total) * 100)) : null
+          if (progressPercent === lastPercent) return
+          lastPercent = progressPercent ?? -1
+          patchState({ stage: 'downloading', progressPercent, error: null })
+        }
+      })
 
       patchState({
         stage: 'downloaded',
@@ -347,7 +315,6 @@ async function downloadUpdate(): Promise<AppUpdateState> {
         error: null
       })
     } catch (err) {
-      await fs.rm(tempPath, { force: true })
       patchState({
         stage: 'error',
         progressPercent: null,
@@ -366,10 +333,10 @@ async function downloadUpdate(): Promise<AppUpdateState> {
 }
 
 function registerIpc(): void {
-  ipcMain.handle('appUpdate:getState', () => ({ ...updateState }))
-  ipcMain.handle('appUpdate:check', async () => checkForUpdates())
-  ipcMain.handle('appUpdate:download', async () => downloadUpdate())
-  ipcMain.handle('appUpdate:quitAndInstall', () => {
+  handleTrusted('appUpdate:getState', () => ({ ...updateState }))
+  handleTrusted('appUpdate:check', async () => checkForUpdates())
+  handleTrusted('appUpdate:download', async () => downloadUpdate())
+  handleTrusted('appUpdate:quitAndInstall', () => {
     throw new Error('Instalación automática no disponible sin firma. Descarga e instala manualmente.')
   })
 }

@@ -1,7 +1,8 @@
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { runSvn } from './svn-runtime'
+import { buildExternalsNotice, detectSkippedExternals } from './externals'
 import { BASE_REPO_PATH } from './local-paths'
 import { buildHistoricalRemoteTarget } from './read-contract'
 export {
@@ -26,7 +27,13 @@ export interface CheckoutRemoteOptions {
   revision?: number
   onData?: (chunk: string) => void
   onErrorData?: (chunk: string) => void
+  signal?: AbortSignal
+  /** Base directory (tests); defaults to the ArtiSVN repositories folder. */
+  basePath?: string
 }
+
+/** Large SAT checkouts can take hours: stop only when svn is silent this long. */
+export const CHECKOUT_IDLE_TIMEOUT_MS = 15 * 60 * 1000
 
 export interface CheckoutRemoteResult {
   success: true
@@ -34,6 +41,8 @@ export interface CheckoutRemoteResult {
   targetName: string
   skippedInvalidCount?: number
   skippedInvalidPaths?: string[]
+  /** svn:externals definitions present but not fetched (externals are never fetched automatically). */
+  skippedExternalsCount?: number
 }
 
 interface RemoteListEntry {
@@ -86,6 +95,15 @@ function toLocalPath(targetPath: string, relativePath: string): string {
 function removeCheckoutTarget(targetPath: string): void {
   if (existsSync(targetPath)) {
     rmSync(targetPath, { recursive: true, force: true, maxRetries: 3 })
+  }
+}
+
+function svnLongRunOptions(options: CheckoutRemoteOptions) {
+  return {
+    idleTimeoutMs: CHECKOUT_IDLE_TIMEOUT_MS,
+    signal: options.signal,
+    onData: options.onData,
+    onErrorData: options.onErrorData
   }
 }
 
@@ -158,14 +176,7 @@ async function runSvnUpdateBatches(
 ): Promise<void> {
   for (let i = 0; i < targets.length; i += SVN_UPDATE_BATCH_SIZE) {
     const batch = targets.slice(i, i + SVN_UPDATE_BATCH_SIZE)
-    await runSvn(
-      ['update', ...argsBeforeTargets, ...batch],
-      {
-        timeoutMs: 10 * 60 * 1000,
-        onData: options.onData,
-        onErrorData: options.onErrorData
-      }
-    )
+    await runSvn(['update', ...argsBeforeTargets, '--', ...batch], svnLongRunOptions(options))
   }
 }
 
@@ -178,17 +189,13 @@ async function sparseCheckoutRemoteToLocalRepo(
   emitProgress(options, 'El checkout normal falló por nombres de archivo no válidos. Reintentando en modo compatible...')
 
   await runSvn(
-    ['checkout', '--depth', 'empty', ...target.revisionArgs, target.targetUrl, targetPath],
-    {
-      timeoutMs: 10 * 60 * 1000,
-      onData: options.onData,
-      onErrorData: options.onErrorData
-    }
+    ['checkout', '--depth', 'empty', ...target.revisionArgs, '--', target.targetUrl, targetPath],
+    svnLongRunOptions(options)
   )
 
   const { stdout } = await runSvn(
     ['list', '--xml', '--recursive', ...target.revisionArgs, target.targetUrl],
-    { timeoutMs: 10 * 60 * 1000 }
+    { idleTimeoutMs: CHECKOUT_IDLE_TIMEOUT_MS, signal: options.signal }
   )
   const plan = buildSparseCheckoutPlan(normalizeRemoteListEntries(await parseXml(stdout)))
 
@@ -233,34 +240,64 @@ export async function checkoutRemoteToLocalRepo(
 ): Promise<CheckoutRemoteResult> {
   const target = buildHistoricalRemoteTarget(url, options.revision)
   const safeTargetName = sanitizeLocalRepoName(targetName)
-  const targetPath = join(BASE_REPO_PATH, safeTargetName)
+  const basePath = options.basePath ?? BASE_REPO_PATH
+  const targetPath = join(basePath, safeTargetName)
 
   if (existsSync(targetPath)) {
     throw new Error(`Ya existe un directorio con el nombre "${safeTargetName}"`)
   }
 
+  // Create the destination ourselves (fails if it appeared meanwhile). Only a
+  // directory created by this operation is ever removed on failure.
+  mkdirSync(basePath, { recursive: true })
+  try {
+    mkdirSync(targetPath)
+  } catch {
+    throw new Error(`Ya existe un directorio con el nombre "${safeTargetName}"`)
+  }
+
+  /** Returns true when the directory created by this operation was removed. */
+  const cleanupCreatedTarget = (): boolean => {
+    try {
+      removeCheckoutTarget(targetPath)
+      return !existsSync(targetPath)
+    } catch {
+      return false
+    }
+  }
+
+  const withExternalsNotice = async (result: CheckoutRemoteResult): Promise<CheckoutRemoteResult> => {
+    const skippedExternalsCount = await detectSkippedExternals(targetPath)
+    const notice = buildExternalsNotice(skippedExternalsCount)
+    if (notice) emitProgress(options, notice)
+    return skippedExternalsCount > 0 ? { ...result, skippedExternalsCount } : result
+  }
+
   try {
     await runSvn(
-      ['checkout', ...target.revisionArgs, target.targetUrl, targetPath],
-      {
-        timeoutMs: 10 * 60 * 1000,
-        onData: options.onData,
-        onErrorData: options.onErrorData
-      }
+      ['checkout', ...target.revisionArgs, '--', target.targetUrl, targetPath],
+      svnLongRunOptions(options)
     )
-    return { success: true, path: targetPath, targetName: safeTargetName }
+    return await withExternalsNotice({ success: true, path: targetPath, targetName: safeTargetName })
   } catch (error) {
     const message = error instanceof Error ? String(error.message || '').trim() : ''
-    if (isInvalidFilenameCheckoutError(message)) {
-      removeCheckoutTarget(targetPath)
+    if (isInvalidFilenameCheckoutError(message) && !options.signal?.aborted) {
+      cleanupCreatedTarget()
       try {
-        return await sparseCheckoutRemoteToLocalRepo(target, targetPath, safeTargetName, options)
+        mkdirSync(targetPath)
+        return await withExternalsNotice(await sparseCheckoutRemoteToLocalRepo(target, targetPath, safeTargetName, options))
       } catch (fallbackError) {
-        removeCheckoutTarget(targetPath)
+        cleanupCreatedTarget()
         const fallbackMessage = fallbackError instanceof Error ? String(fallbackError.message || '').trim() : ''
         throw new Error(fallbackMessage || message || 'Error al descargar el repositorio')
       }
     }
-    throw new Error(message || 'Error al descargar el repositorio')
+    const removed = cleanupCreatedTarget()
+    throw new Error(
+      `${message || 'Error al descargar el repositorio'}\n` +
+      (removed
+        ? '(Se eliminó la copia parcial creada por esta descarga.)'
+        : `(No se pudo eliminar la copia parcial en "${safeTargetName}"; bórrala manualmente antes de reintentar.)`)
+    )
   }
 }

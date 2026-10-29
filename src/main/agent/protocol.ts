@@ -29,6 +29,16 @@ export interface BrokerRequest {
   params?: Record<string, unknown>
 }
 
+/** Cancellation belongs to one authenticated socket, never another client. */
+export interface BrokerCancel {
+  type: 'cancel'
+  requestId: string
+}
+
+export interface BrokerRequestContext {
+  signal: AbortSignal
+}
+
 export interface BrokerResponse {
   id: string
   ok: boolean

@@ -4,10 +4,12 @@ export interface AgentLocalRepoSummary {
   id: string
   name: string
   url: string
-  revision: number
-  lastUpdated: string
-  changesCount: number
+  revision: number | null
+  lastUpdated: string | null
+  changesCount: number | null
   author?: string
+  metadataState: 'pending' | 'ready' | 'error'
+  metadataError?: string
 }
 
 export interface AgentRemoteEntry {

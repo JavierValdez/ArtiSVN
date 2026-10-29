@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type CSSProperties } from 'react'
-import { ActiveTab, AgentActivityEntry, AgentClientConfig, AgentIntegrationState, BlameLine, ConflictAccept, ConflictContent, Credentials, EditorId, EditorOption, FileChange, LocalRepo, MigrationAction, MigrationInspection, MigrationResult, RemoteServer } from './types/svn'
+import { ActiveTab, AgentActivityEntry, AgentClientConfig, AgentIntegrationState, BlameLine, ConflictAccept, ConflictContent, Credentials, EditorId, EditorOption, FileChange, LocalRepo, MigrationAction, MigrationInspection, MigrationResult, RemoteServer, RevisionSnapshot } from './types/svn'
 import Sidebar from './components/Sidebar'
 import ChangesView from './components/ChangesView'
 import ExplorerView from './components/ExplorerView'
@@ -9,6 +9,9 @@ import ProfileDialog from './components/ProfileDialog'
 import AgentIntegrationDialog from './components/AgentIntegrationDialog'
 import VerticalResizeHandle from './components/VerticalResizeHandle'
 import { useResizablePanel } from './hooks/useResizablePanel'
+import { mergeRepoUpdate, repoRevisionLabel } from './utils/repoMeta'
+import { saveCredentials, toPublicCredentials, type CredentialsInput } from './utils/credentialsSave'
+import { describeSkippedExternals } from './utils/externals'
 
 export interface AppUpdateState {
   stage: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error' | 'unsupported'
@@ -43,6 +46,8 @@ declare global {
       deleteRemote: (remoteId: string) => Promise<boolean>
       renameRemote: (remoteId: string, name: string, url?: string) => Promise<RemoteServer>
       listLocalRepos: () => Promise<LocalRepo[]>
+      onReposUpdated?: (cb: (repo: LocalRepo) => void) => () => void
+      cancelSearch?: () => Promise<boolean>
       getBasePath: () => Promise<string>
       deleteRepo: (repoPath: string) => Promise<void>
       listRemote: (url: string) => Promise<any[]>
@@ -54,6 +59,7 @@ declare global {
       remoteFileContent: (url: string) => Promise<string>
       getRepoRoot: (url: string) => Promise<string | null>
       remoteRevisionDiff: (baseUrl: string, svnPath: string, revision: number) => Promise<string>
+      remoteRevisionFileContent: (baseUrl: string, svnPath: string, revision: number) => Promise<RevisionSnapshot>
       remoteMkdir: (parentUrl: string, name: string, message?: string) => Promise<any>
       remoteCreateFile: (parentUrl: string, name: string, content?: string, message?: string) => Promise<any>
       downloadFile: (url: string, defaultName: string) => Promise<{ canceled?: boolean; success?: boolean; path?: string }>
@@ -74,6 +80,7 @@ declare global {
       ignore: (repoPath: string, filePath: string, scope?: 'item' | 'branch') => Promise<{ success: boolean; scope: 'item' | 'branch'; ignoredName: string; propertyTarget: string; alreadyPresent: boolean }>
       getConflictContent: (repoPath: string, filePath: string) => Promise<ConflictContent>
       revisionFileDiff: (repoPath: string, revision: number, svnPath: string) => Promise<string>
+      revisionFileContent: (repoPath: string, revision: number, svnPath: string) => Promise<RevisionSnapshot>
       restorePathAtRevision: (repoPath: string, revision: number, svnPath: string, action: 'A' | 'M' | 'D' | 'R') => Promise<{ success: boolean; path: string; kind: 'file' | 'dir'; restoredRevision: number }>
       blame: (repoPath: string, filePath: string) => Promise<BlameLine[]>
       commit: (repoPath: string, files: string[], message: string) => Promise<any>
@@ -112,6 +119,8 @@ declare global {
       getState: () => Promise<AgentIntegrationState>
       setEnabled: (enabled: boolean) => Promise<AgentIntegrationState>
       getClientConfig: () => Promise<AgentClientConfig>
+      /** Copies the full config (with token) to the clipboard from the main process. */
+      copyClientConfig: () => Promise<boolean>
       regenerateToken: () => Promise<AgentIntegrationState>
       getActivity: () => Promise<AgentActivityEntry[]>
       clearActivity: () => Promise<AgentActivityEntry[]>
@@ -250,8 +259,7 @@ export default function App() {
         setRemoteServers(remotes)
         setActiveRemoteId(remotes.find((r) => r.active)?.id || null)
 
-        const creds = await window.svn.getCredentials()
-        const validCreds = creds?.username ? creds : null
+        const validCreds = toPublicCredentials(await window.svn.getCredentials())
         setCredentials(validCreds)
         if (!validCreds) setShowAuthDialog(true)
 
@@ -283,7 +291,15 @@ export default function App() {
     init()
 
     const unsubUpdate = window.svn.onAppUpdateState?.((state) => setAppUpdateState(state))
-    return () => { unsubUpdate?.() }
+    // Background metadata enrichment pushes one repository at a time (every window).
+    const unsubRepos = window.svn.onReposUpdated?.((updated) => {
+      setLocalRepos((current) => mergeRepoUpdate(current, updated))
+      setSelectedRepo((current) => (current && current.path === updated.path ? { ...current, ...updated } : current))
+    })
+    return () => {
+      unsubUpdate?.()
+      unsubRepos?.()
+    }
   }, [migrationGateReady, toast])
 
   const loadChanges = async (options: { silent?: boolean } = {}) => {
@@ -379,8 +395,10 @@ export default function App() {
     })
 
     try {
-      await window.svn.update(selectedRepo.path)
+      const result = await window.svn.update(selectedRepo.path)
       toast('Repositorio actualizado correctamente', 'success')
+      const externalsNote = describeSkippedExternals(result?.skippedExternalsCount)
+      if (externalsNote) toast(externalsNote, 'info')
       await loadChanges({ silent: true })
       await refreshRepos()
     } catch (err: any) {
@@ -429,14 +447,24 @@ export default function App() {
     setActiveTab('changes')
   }
 
-  const handleAuthSave = async (creds: { username: string; password: string; serverUrl: string }) => {
-    await window.svn.setCredentials(creds)
-    setCredentials(creds as Credentials)
+  /**
+   * Returns null on success, or an error message (the dialog stays open and shows it).
+   * State is reloaded from main's sanitized credentials: the password never stays in renderer state.
+   */
+  const handleAuthSave = async (creds: CredentialsInput): Promise<string | null> => {
+    const result = await saveCredentials(window.svn, creds, 'replace')
+    if (!result.ok) {
+      toast(result.error, 'error')
+      return result.error
+    }
+    setCredentials(result.credentials)
     setAuthInitialServerUrl(creds.serverUrl || DEFAULT_SERVER_URL)
     setShowAuthDialog(false)
+    setAuthErrorDetected(false)
     toast('Credenciales guardadas', 'success')
-    await refreshRepos()
-    await refreshRemotes()
+    await refreshRepos().catch(() => undefined)
+    await refreshRemotes().catch(() => undefined)
+    return null
   }
 
   const handleRequestCredentials = (serverUrl?: string, authError = false) => {
@@ -449,20 +477,20 @@ export default function App() {
     }
   }
 
-  const handleProfileSave = async (creds: { username: string; password: string; serverUrl: string }) => {
-    if (creds.password) {
-      await window.svn.setCredentials(creds)
-      setCredentials(creds as Credentials)
-    } else {
-      await window.svn.updateCredentials(creds)
-      setCredentials({ username: creds.username, password: credentials?.password || '', serverUrl: creds.serverUrl } as Credentials)
+  const handleProfileSave = async (creds: CredentialsInput): Promise<string | null> => {
+    const result = await saveCredentials(window.svn, creds, creds.password ? 'replace' : 'update')
+    if (!result.ok) {
+      toast(result.error, 'error')
+      return result.error
     }
+    setCredentials(result.credentials)
     setAuthInitialServerUrl(creds.serverUrl || DEFAULT_SERVER_URL)
     setShowProfileDialog(false)
     setAuthErrorDetected(false)
     toast('Credenciales actualizadas', 'success')
-    await refreshRepos()
-    await refreshRemotes()
+    await refreshRepos().catch(() => undefined)
+    await refreshRemotes().catch(() => undefined)
+    return null
   }
 
   const handleLogout = async () => {
@@ -850,7 +878,7 @@ export default function App() {
                 <div className="toolbar-repo-name">{selectedRepo.name}</div>
                 <div className="toolbar-branch">
                   <span>🌿</span>
-                  <span>main (r{selectedRepo.revision})</span>
+                  <span>main ({repoRevisionLabel(selectedRepo)})</span>
                 </div>
                 <button
                   className="btn btn-default"

@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node
 import { dirname } from 'node:path'
 import { generateAgentToken } from '../agent/token'
 import { resolveLocalPaths } from './local-paths'
+import { credentialOriginKey, isCredentialSafeScheme, parseSvnOrigin } from './svn-policy'
 
 export interface StoredCredentials {
   username: string
@@ -91,11 +92,109 @@ export function decryptSecret(value: string): string {
 }
 
 export function writeStoredCredentials(creds: StoredCredentials): void {
+  const passwordEncrypted = encryptSecret(creds.password)
   storeSet('credentials', {
     username: creds.username,
-    passwordEncrypted: encryptSecret(creds.password),
+    passwordEncrypted,
     serverUrl: creds.serverUrl
   })
+  bindCredentialsToOrigin(creds.serverUrl, creds.username, passwordEncrypted)
+}
+
+interface StoredOriginCredential {
+  username: string
+  passwordEncrypted: string
+  boundAt: string
+}
+
+const CREDENTIALS_BY_ORIGIN_KEY = 'credentialsByOrigin'
+
+function readCredentialsByOrigin(): Record<string, StoredOriginCredential> | null {
+  const raw = storeGet<Record<string, unknown>>(CREDENTIALS_BY_ORIGIN_KEY)
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const result: Record<string, StoredOriginCredential> = {}
+  for (const [key, value] of Object.entries(raw)) {
+    if (!value || typeof value !== 'object') continue
+    const entry = value as Record<string, unknown>
+    if (typeof entry.passwordEncrypted !== 'string') continue
+    result[key] = {
+      username: String(entry.username || ''),
+      passwordEncrypted: entry.passwordEncrypted,
+      boundAt: String(entry.boundAt || '')
+    }
+  }
+  return result
+}
+
+/**
+ * Binds the (already encrypted) password to the exact origin of `serverUrl`.
+ * Credentials for `http:` origins are never stored for automatic use.
+ */
+function bindCredentialsToOrigin(serverUrl: string, username: string, passwordEncrypted: string): void {
+  const origin = parseSvnOrigin(serverUrl)
+  if (!origin || !isCredentialSafeScheme(origin.scheme) || !username) return
+  const current = readCredentialsByOrigin() || {}
+  current[credentialOriginKey(origin)] = {
+    username,
+    passwordEncrypted,
+    boundAt: new Date().toISOString()
+  }
+  storeSet(CREDENTIALS_BY_ORIGIN_KEY, current)
+}
+
+/**
+ * One-time migration for stores written before credentials were origin-bound:
+ * bind the legacy credential to the server URL it was saved with. The encrypted
+ * value is copied as-is (never decrypted and rewritten in clear text).
+ */
+function migrateLegacyCredentialBinding(): Record<string, StoredOriginCredential> {
+  const existing = readCredentialsByOrigin()
+  if (existing) return existing
+
+  const stored = storeGet<Record<string, unknown>>('credentials')
+  const result: Record<string, StoredOriginCredential> = {}
+  if (stored && typeof stored === 'object') {
+    // Ensure plaintext legacy entries get encrypted first.
+    if (typeof stored.passwordEncrypted !== 'string' && typeof stored.password === 'string') {
+      getStoredCredentials()
+    }
+    const refreshed = storeGet<Record<string, unknown>>('credentials') || {}
+    const boundUrl = String(refreshed.serverUrl || storeGet('serverUrl') || '')
+    const origin = parseSvnOrigin(boundUrl)
+    if (
+      origin
+      && isCredentialSafeScheme(origin.scheme)
+      && typeof refreshed.passwordEncrypted === 'string'
+      && refreshed.username
+    ) {
+      result[credentialOriginKey(origin)] = {
+        username: String(refreshed.username),
+        passwordEncrypted: refreshed.passwordEncrypted,
+        boundAt: new Date().toISOString()
+      }
+    }
+  }
+  storeSet(CREDENTIALS_BY_ORIGIN_KEY, result)
+  return result
+}
+
+/** Returns credentials bound to the given canonical origin key, if any. */
+export function getCredentialsForOrigin(originKey: string): { username: string; password: string } | null {
+  if (!originKey) return null
+  const map = migrateLegacyCredentialBinding()
+  const entry = map[originKey]
+  if (!entry || !entry.username) return null
+  return { username: entry.username, password: decryptSecret(entry.passwordEncrypted) }
+}
+
+/** Origins (canonical keys) that have credentials bound. Never returns secrets. */
+export function listCredentialOriginKeys(): string[] {
+  return Object.keys(migrateLegacyCredentialBinding())
+}
+
+export function clearStoredCredentials(): void {
+  storeDelete('credentials')
+  storeDelete(CREDENTIALS_BY_ORIGIN_KEY)
 }
 
 export function getStoredCredentials(): StoredCredentials | null {
@@ -129,6 +228,8 @@ export function getCurrentServerUrl(defaultValue = ''): string {
 }
 
 function updateStoredCredentialsServerUrl(serverUrl: string): void {
+  // Pin legacy credentials before navigation can change their displayed URL.
+  migrateLegacyCredentialBinding()
   const stored = storeGet<Record<string, unknown>>('credentials')
   if (!stored || typeof stored !== 'object') return
 

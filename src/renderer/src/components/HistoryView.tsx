@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { LocalRepo, LogEntry } from '../types/svn'
-import DiffViewer from './DiffViewer'
+import HistoricalFileDialog, { useHistoricalFileTarget } from './history/HistoricalFileDialog'
 import PdfPreviewDialog, { PdfPreviewState } from './PdfPreviewDialog'
 import VerticalResizeHandle from './VerticalResizeHandle'
 import { isWordFile, isPreviewableFile } from '../utils/fileTypes'
@@ -51,20 +51,13 @@ function splitPath(fullPath: string): { dir: string; file: string } {
   return { dir, file }
 }
 
-interface FileDiffState {
-  svnPath: string
-  fileName: string
-  diff: string | null
-  loading: boolean
-}
-
 export default function HistoryView({ repo, toast, onWorkingCopyChanged }: Props) {
   const [log, setLog] = useState<LogEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
   const [hasMore, setHasMore] = useState(false)
   const [selected, setSelected] = useState<LogEntry | null>(null)
-  const [fileDiff, setFileDiff] = useState<FileDiffState | null>(null)
+  const historicalFile = useHistoricalFileTarget()
   const [repoInfo, setRepoInfo] = useState<{ url: string; rootUrl: string } | null>(null)
   const [pdfPreview, setPdfPreview] = useState<PdfPreviewState | null>(null)
   const [restoringKey, setRestoringKey] = useState<string | null>(null)
@@ -82,7 +75,7 @@ export default function HistoryView({ repo, toast, onWorkingCopyChanged }: Props
   })
 
   useEffect(() => {
-    setFileDiff(null)
+    historicalFile.close()
     setPdfPreview(null)
     loadLog()
   }, [repo.path])
@@ -147,17 +140,17 @@ export default function HistoryView({ repo, toast, onWorkingCopyChanged }: Props
     }
   }
 
-  const openFileDiff = async (svnPath: string, revision: number) => {
+  /** Opens the shared Diff / Archivo completo modal, bound to this repo and revision. */
+  const openFileDiff = (svnPath: string, revision: number) => {
+    const repoPath = repo.path
     const parts = svnPath.split('/')
-    const fileName = parts[parts.length - 1] || svnPath
-    setFileDiff({ svnPath, fileName, diff: null, loading: true })
-    try {
-      const diff = await window.svn.revisionFileDiff(repo.path, revision, svnPath)
-      setFileDiff({ svnPath, fileName, diff, loading: false })
-    } catch (err: any) {
-      toast(err.message || 'Error al obtener el diff', 'error')
-      setFileDiff(null)
-    }
+    historicalFile.open({
+      svnPath,
+      fileName: parts[parts.length - 1] || svnPath,
+      revision,
+      loadDiff: () => window.svn.revisionFileDiff(repoPath, revision, svnPath),
+      loadSnapshot: () => window.svn.revisionFileContent(repoPath, revision, svnPath)
+    })
   }
 
   const openPdfAtRevision = async (svnPath: string, revision: number) => {
@@ -453,44 +446,8 @@ export default function HistoryView({ repo, toast, onWorkingCopyChanged }: Props
           </div>
         )}
       </div>
-      {/* File diff modal */}
-      {fileDiff && (
-        <div className="overlay" onClick={(e) => { if (e.target === e.currentTarget) setFileDiff(null) }}>
-          <div className="dialog" style={{ width: '85vw', maxWidth: 1100, maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}>
-            <div className="dialog-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <span>Diff · {fileDiff.fileName}</span>
-              {selected && (
-                <span style={{ fontSize: 11, fontWeight: 400, fontFamily: 'SF Mono, Menlo, monospace', color: 'var(--accent)', background: '#dbeafe', borderRadius: 10, padding: '2px 8px' }}>
-                  r{selected.revision}
-                </span>
-              )}
-              <button
-                className="btn btn-ghost"
-                style={{ marginLeft: 'auto', padding: '2px 8px' }}
-                onClick={() => setFileDiff(null)}
-              >
-                ✕
-              </button>
-            </div>
-            <div className="dialog-sub" style={{ fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all', marginBottom: 8 }}>
-              {fileDiff.svnPath}
-            </div>
-            <div style={{ flex: 1, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 6 }}>
-              {fileDiff.loading ? (
-                <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
-                  <div className="spinner spinner-lg" />
-                </div>
-              ) : fileDiff.diff && fileDiff.diff.includes('@@') ? (
-                <DiffViewer diff={fileDiff.diff} filePath={fileDiff.fileName} />
-              ) : (
-                <div style={{ padding: 24, color: 'var(--text2)', fontSize: 13 }}>
-                  {fileDiff.diff || '(sin cambios)'}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Historical file: Diff / Archivo completo */}
+      <HistoricalFileDialog target={historicalFile.target} onClose={historicalFile.close} />
       <PdfPreviewDialog
         state={pdfPreview}
         onClose={() => setPdfPreview(null)}

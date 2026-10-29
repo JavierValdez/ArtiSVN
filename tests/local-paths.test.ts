@@ -38,3 +38,11 @@ test('local paths derive Documents from an injected home path', () => {
 test('the shared repository base now uses the canonical directory name', () => {
   assert.equal(BASE_REPO_PATH.endsWith(join('Documents', CANONICAL_REPOS_DIRECTORY_NAME)), true)
 })
+
+test('dev-only documents override is ignored outside development', async () => {
+  const { resolveDocumentsDirectory } = await import('../src/main/services/local-paths')
+  assert.equal(resolveDocumentsDirectory({ NODE_ENV: 'development', ARTISVN_DEV_DOCUMENTS_DIR: '/tmp/docs' }, '/home/x'), '/tmp/docs')
+  assert.equal(resolveDocumentsDirectory({ ARTISVN_DEV_DOCUMENTS_DIR: '/tmp/docs' }, '/home/x'), join('/home/x', 'Documents'))
+  assert.equal(resolveDocumentsDirectory({ NODE_ENV: 'production', ARTISVN_DEV_DOCUMENTS_DIR: '/tmp/docs' }, '/home/x'), join('/home/x', 'Documents'))
+  assert.equal(resolveDocumentsDirectory({ NODE_ENV: 'development' }, '/home/x'), join('/home/x', 'Documents'))
+})

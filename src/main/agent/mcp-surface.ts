@@ -1,11 +1,13 @@
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import type { BrokerRequestOptions } from './broker-client'
+import { mcpSearchTimeoutMs, MCP_SEARCH_BROKER_GRACE_MS, MCP_SEARCH_MAX_TIMEOUT_MS } from './search-request-policy'
 
 export interface BrokerRequester {
   request(
     method: string,
     params?: Record<string, unknown>,
-    options?: { onProgress?: (progress: unknown) => void }
+    options?: BrokerRequestOptions
   ): Promise<unknown>
 }
 
@@ -84,18 +86,23 @@ export function registerTools(server: McpServer, broker: BrokerRequester): void 
   }, async (args) => asTextResult(await broker.request('remote_list', args)))
 
   server.registerTool('remote_search', {
-    description: 'Search remote SVN entries by name/comment and optionally file content, optionally at one historical revision.',
+    description: 'Search remote SVN names and comments, optionally file content, at a consistent revision. Returns partial results with truncated/stopReason if the default 20-second budget is reached; narrow the URL or use timeoutMs (up to 45 seconds). Repeated searches reuse short-lived snapshots.',
     inputSchema: z.object({
       ...remoteTargetShape,
       query: z.string(),
       deepSearch: z.boolean().optional(),
-      maxResults: z.number().int().positive().max(500).optional()
+      maxResults: z.number().int().positive().max(500).optional(),
+      timeoutMs: z.number().int().min(1000).max(MCP_SEARCH_MAX_TIMEOUT_MS).optional()
     }).refine((value) => Boolean(value.remoteId || value.url), {
       message: 'remoteId or url is required'
     })
   }, async (args, extra) => {
     const progressToken = extra._meta?.progressToken
+    const budgetMs = mcpSearchTimeoutMs(args.timeoutMs)
+    let lastProgress = 0
     return asTextResult(await broker.request('remote_search', args, {
+      signal: extra.signal,
+      timeoutMs: budgetMs + MCP_SEARCH_BROKER_GRACE_MS,
       onProgress: progressToken === undefined
         ? undefined
         : (value) => {
@@ -104,7 +111,9 @@ export function registerTools(server: McpServer, broker: BrokerRequester): void 
             total?: number
             listingStats?: { dirs: number; entries: number }
           }
-          const current = progress.listingStats?.entries ?? progress.searched ?? 0
+          const rawCurrent = progress.listingStats?.entries ?? progress.searched ?? 0
+          const current = Math.max(lastProgress + 1, Number.isFinite(rawCurrent) ? rawCurrent : 0)
+          lastProgress = current
           const total = progress.total && progress.total > 0 ? progress.total : undefined
           const message = progress.listingStats
             ? `Explorando ${progress.listingStats.entries} entradas en ${progress.listingStats.dirs} carpetas`
@@ -116,10 +125,10 @@ export function registerTools(server: McpServer, broker: BrokerRequester): void 
             params: {
               progressToken,
               progress: current,
-              total,
+              // Phases use different units; do not advertise a misleading total.
               message
             }
-          })
+          }).catch(() => { /* the MCP transport may have just been cancelled */ })
         }
     }))
   })

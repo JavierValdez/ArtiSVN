@@ -1,3 +1,5 @@
+import type { BrokerRequestContext } from './protocol'
+import { mcpSearchTimeoutMs } from './search-request-policy'
 import { app, BrowserWindow, dialog } from 'electron'
 import type { MessageBoxOptions } from 'electron'
 import { mkdirSync } from 'node:fs'
@@ -5,7 +7,7 @@ import { join } from 'node:path'
 import { ensureAgentIntegrationToken, getAgentIntegrationState, regenerateAgentIntegrationToken, setAgentIntegrationEnabled } from '../services/store'
 import { resolveLocalPaths } from '../services/local-paths'
 import {
-  listLocalRepos,
+  listLocalReposEnriched,
   listRemote,
   localBlame,
   localDiff,
@@ -120,7 +122,7 @@ async function confirmAgentCheckout(
 async function confirmAgentUpdate(session: AgentSession, repo: {
   name: string
   url: string
-  revision: number
+  revision: number | null
 }): Promise<void> {
   const options: MessageBoxOptions = {
     type: 'question',
@@ -132,7 +134,7 @@ async function confirmAgentUpdate(session: AgentSession, repo: {
     detail:
       `${session.clientName} solicitó actualizar:\n${repo.name}` +
       `${repo.url ? `\n${repo.url}` : ''}` +
-      `\nRevisión actual: r${repo.revision}\n\n` +
+      `\nRevisión actual: ${repo.revision === null ? 'desconocida' : `r${repo.revision}`}\n\n` +
       'La working copy local puede recibir cambios nuevos del servidor SVN.'
   }
   const ownerWindow = getDialogOwnerWindow()
@@ -148,7 +150,8 @@ async function confirmAgentUpdate(session: AgentSession, repo: {
 async function handleBrokerRequest(
   session: AgentSession,
   request: BrokerRequest,
-  emitProgress: (progress: unknown) => void
+  emitProgress: (progress: unknown) => void,
+  context?: BrokerRequestContext
 ): Promise<unknown> {
   const started = Date.now()
   const params = request.params || {}
@@ -160,7 +163,8 @@ async function handleBrokerRequest(
         result = listRemotes()
         break
       case 'list_local_repos':
-        result = (await listLocalRepos()).map(sanitizeLocalRepo)
+        // Lazy, on-demand metadata (cached; bounded concurrency/timeouts).
+        result = (await listLocalReposEnriched({ includeStatus: true })).map(sanitizeLocalRepo)
         break
       case 'local_status': {
         const repo = await resolveLocalRepo(String(params.repoId || ''))
@@ -214,6 +218,8 @@ async function handleBrokerRequest(
           Boolean(params.deepSearch),
           {
             maxResults: Number(params.maxResults || 200),
+            signal: context?.signal,
+            limits: { maxDurationMs: mcpSearchTimeoutMs(params.timeoutMs) },
             onProgress: emitProgress,
             revision: params.revision === undefined ? undefined : Number(params.revision)
           }
@@ -261,21 +267,23 @@ async function handleBrokerRequest(
         )
         await confirmAgentCheckout(session, url, targetName, revision)
         const checkout = await checkoutRemoteToLocalRepo(url, targetName, { revision })
-        const repo = (await listLocalRepos()).find((candidate) => candidate.path === checkout.path)
+        const repo = (await listLocalReposEnriched({ includeStatus: false })).find((candidate) => candidate.path === checkout.path)
         result = {
           success: true,
-          repo: repo ? sanitizeLocalRepo(repo) : null
+          repo: repo ? sanitizeLocalRepo(repo) : null,
+          ...(checkout.skippedExternalsCount ? { skippedExternalsCount: checkout.skippedExternalsCount } : {})
         }
         break
       }
       case 'update_local_repo': {
-        const repo = await resolveLocalRepo(String(params.repoId || ''))
+        const repo = await resolveLocalRepo(String(params.repoId || ''), { includeStatus: false })
         await confirmAgentUpdate(session, repo)
-        await updateLocalRepo(repo.path)
-        const updatedRepo = await resolveLocalRepo(repo.id)
+        const updateResult = await updateLocalRepo(repo.path)
+        const updatedRepo = await resolveLocalRepo(repo.id, { includeStatus: true })
         result = {
           success: true,
-          repo: sanitizeLocalRepo(updatedRepo)
+          repo: sanitizeLocalRepo(updatedRepo),
+          ...(updateResult.skippedExternalsCount ? { skippedExternalsCount: updateResult.skippedExternalsCount } : {})
         }
         break
       }
@@ -285,7 +293,7 @@ async function handleBrokerRequest(
         break
       case 'resource:repos':
         kind = 'resource'
-        result = (await listLocalRepos()).map(sanitizeLocalRepo)
+        result = (await listLocalReposEnriched({ includeStatus: true })).map(sanitizeLocalRepo)
         break
       case 'resource:repo_status': {
         kind = 'resource'

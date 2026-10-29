@@ -2,6 +2,10 @@ export interface UpdateDownloadAsset {
   name: string
   url: string
   size: number | null
+  /** electron-builder metadata checksum (base64 SHA-512). */
+  sha512?: string | null
+  /** GitHub asset digest (hex SHA-256), when GitHub provides it. */
+  sha256?: string | null
 }
 
 export interface LatestReleaseInfo {
@@ -35,6 +39,85 @@ export const DEFAULT_RELEASES_BASE_URL =
 
 const USER_AGENT = 'ArtiSVN'
 const DEFAULT_TIMEOUT_MS = 10_000
+const MAX_REDIRECTS = 5
+
+/**
+ * Hosts allowed for update metadata and installer downloads (HTTPS only).
+ * GitHub release assets are served from github.com and redirected to its CDN.
+ *
+ * Limits (documented on purpose): checksums come from the same release channel
+ * (GitHub API / GCS metadata). They detect corruption, truncation and stale or
+ * swapped files, and HTTPS + this allowlist bind the channel to these hosts, but a
+ * compromised release channel could publish matching metadata. Installers are
+ * not code-signed yet, so there is no independent publisher authentication; the
+ * installation remains manual.
+ */
+export const DEFAULT_ALLOWED_UPDATE_HOSTS = [
+  'api.github.com',
+  'github.com',
+  'objects.githubusercontent.com',
+  'release-assets.githubusercontent.com',
+  'storage.googleapis.com'
+]
+
+export function getAllowedUpdateHosts(env: NodeJS.ProcessEnv = process.env): string[] {
+  const hosts = new Set(DEFAULT_ALLOWED_UPDATE_HOSTS)
+  try {
+    const base = new URL(getReleasesBaseUrl(env))
+    if (base.protocol === 'https:') hosts.add(base.hostname.toLowerCase())
+  } catch {
+    // ignore invalid override
+  }
+  return Array.from(hosts)
+}
+
+export function isAllowedUpdateUrl(url: string, allowedHosts: string[]): boolean {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'https:') return false
+    if (parsed.username || parsed.password) return false
+    return allowedHosts.includes(parsed.hostname.toLowerCase())
+  } catch {
+    return false
+  }
+}
+
+/**
+ * fetch() that follows redirects manually and validates every hop against the
+ * allowlist (HTTPS + host). Rejects downgrades and unexpected CDNs.
+ */
+export async function fetchWithValidatedRedirects(
+  fetchImpl: typeof fetch,
+  url: string,
+  init: RequestInit,
+  allowedHosts: string[],
+  maxRedirects = MAX_REDIRECTS
+): Promise<Response> {
+  let current = url
+  for (let hop = 0; hop <= maxRedirects; hop += 1) {
+    if (!isAllowedUpdateUrl(current, allowedHosts)) {
+      throw new Error(`URL de actualización no permitida: ${safeHostOf(current)}`)
+    }
+    const response = await fetchImpl(current, { ...init, redirect: 'manual' })
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location')
+      if (!location) throw new Error('Redirección de actualización sin destino')
+      current = new URL(location, current).toString()
+      continue
+    }
+    return response
+  }
+  throw new Error('Demasiadas redirecciones al descargar la actualización')
+}
+
+function safeHostOf(url: string): string {
+  try {
+    const parsed = new URL(url)
+    return `${parsed.protocol}//${parsed.host}`
+  } catch {
+    return 'URL inválida'
+  }
+}
 
 export function normalizeVersion(raw: string): string {
   return raw.trim().replace(/^v/i, '')
@@ -115,7 +198,7 @@ function parseYamlValue(raw: string): string {
 
 function resolveReleaseUrl(value: string, releasesBaseUrl: string): string {
   const assetPath = parseYamlValue(value)
-  if (/^https?:\/\//i.test(assetPath)) return assetPath
+  if (/^[a-z][a-z0-9+.-]*:/i.test(assetPath)) return assetPath
   return `${releasesBaseUrl}/${assetPath.replace(/^\/+/, '')}`
 }
 
@@ -159,15 +242,20 @@ export function parseReleaseMetadata(
 
     const sizeMatch = line.match(/^\s*size:\s*(\d+)\s*$/)
     if (sizeMatch && currentFile) currentFile.size = Number(sizeMatch[1])
+
+    const shaMatch = line.match(/^\s+sha512:\s*(.+)$/)
+    if (shaMatch && currentFile) currentFile.sha512 = parseYamlValue(shaMatch[1])
   }
 
   const pathMatch = raw.match(/^path:\s*(.+)$/m)
   if (files.length === 0 && pathMatch) {
     const assetPath = parseYamlValue(pathMatch[1])
+    const topSha = raw.match(/^sha512:\s*(.+)$/m)
     files.push({
       name: getReleaseAssetName(assetPath),
       url: resolveReleaseUrl(assetPath, releasesBaseUrl),
-      size: null
+      size: null,
+      sha512: topSha ? parseYamlValue(topSha[1]) : null
     })
   }
 
@@ -188,12 +276,13 @@ async function fetchWithTimeout(
   fetchImpl: typeof fetch,
   url: string,
   init: RequestInit,
-  timeoutMs: number
+  timeoutMs: number,
+  allowedHosts: string[]
 ): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetchImpl(url, { ...init, signal: controller.signal })
+    return await fetchWithValidatedRedirects(fetchImpl, url, { ...init, signal: controller.signal }, allowedHosts)
   } finally {
     clearTimeout(timer)
   }
@@ -221,16 +310,19 @@ function parseGitHubRelease(payload: unknown, platform: NodeJS.Platform): Latest
       typeof candidate.name !== 'string' ||
       !candidate.name.trim() ||
       typeof candidate.browser_download_url !== 'string' ||
-      !/^https?:\/\//i.test(candidate.browser_download_url)
+      !/^https:\/\//i.test(candidate.browser_download_url)
     ) {
       return []
     }
+    const digest = typeof candidate.digest === 'string' ? candidate.digest.trim() : ''
+    const sha256 = /^sha256:[a-f0-9]{64}$/i.test(digest) ? digest.slice(7).toLowerCase() : null
     return [{
       name: candidate.name,
       url: candidate.browser_download_url,
       size: typeof candidate.size === 'number' && Number.isFinite(candidate.size)
         ? candidate.size
-        : null
+        : null,
+      sha256
     }]
   })
 
@@ -249,15 +341,15 @@ function parseGitHubRelease(payload: unknown, platform: NodeJS.Platform): Latest
 async function fetchGitHubRelease(
   fetchImpl: typeof fetch,
   platform: NodeJS.Platform,
-  timeoutMs: number
+  timeoutMs: number,
+  allowedHosts: string[]
 ): Promise<LatestReleaseInfo> {
   const response = await fetchWithTimeout(fetchImpl, GITHUB_LATEST_RELEASE_URL, {
     headers: {
       Accept: 'application/vnd.github+json',
       'User-Agent': USER_AGENT
-    },
-    redirect: 'follow'
-  }, timeoutMs)
+    }
+  }, timeoutMs, allowedHosts)
 
   if (!response.ok) {
     throw new Error(`GitHub Releases respondió con estado ${response.status}.`)
@@ -276,7 +368,8 @@ async function fetchGcsRelease(
   fetchImpl: typeof fetch,
   platform: NodeJS.Platform,
   releasesBaseUrl: string,
-  timeoutMs: number
+  timeoutMs: number,
+  allowedHosts: string[]
 ): Promise<LatestReleaseInfo> {
   const fileName = metadataFileName(platform)
   if (!fileName) throw new Error('No hay actualizaciones configuradas para esta plataforma.')
@@ -285,9 +378,8 @@ async function fetchGcsRelease(
     headers: {
       Accept: 'text/yaml,text/plain',
       'User-Agent': USER_AGENT
-    },
-    redirect: 'follow'
-  }, timeoutMs)
+    }
+  }, timeoutMs, allowedHosts)
 
   if (!response.ok) {
     throw new Error(`El bucket de releases respondió con estado ${response.status}.`)
@@ -312,16 +404,18 @@ export async function fetchLatestRelease(
   const fetchImpl = options.fetchImpl ?? fetch
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const releasesBaseUrl = getReleasesBaseUrl(options.env)
+  const allowedHosts = getAllowedUpdateHosts(options.env)
 
   try {
-    const githubRelease = await fetchGitHubRelease(fetchImpl, options.platform, timeoutMs)
+    const githubRelease = await fetchGitHubRelease(fetchImpl, options.platform, timeoutMs, allowedHosts)
     const hasUpdate = compareVersions(githubRelease.version, options.currentVersion) > 0
 
     // A valid no-update response is authoritative even when it has no installer.
-    if (!hasUpdate || githubRelease.downloadAsset) return githubRelease
+    // An installer without a GitHub digest cannot be verified: use GCS metadata (sha512).
+    if (!hasUpdate || githubRelease.downloadAsset?.sha256) return githubRelease
   } catch {
     // GitHub transport, timeout and validation failures deliberately use GCS below.
   }
 
-  return fetchGcsRelease(fetchImpl, options.platform, releasesBaseUrl, timeoutMs)
+  return fetchGcsRelease(fetchImpl, options.platform, releasesBaseUrl, timeoutMs, allowedHosts)
 }

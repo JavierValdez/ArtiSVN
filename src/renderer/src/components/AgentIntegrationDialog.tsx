@@ -88,8 +88,9 @@ export default function AgentIntegrationDialog({ onClose, toast }: Props) {
   const copyConfig = async () => {
     if (!configText) return
     try {
-      await navigator.clipboard.writeText(configText)
-      toast('Configuración MCP copiada', 'success')
+      // The token never reaches the renderer: main copies the full configuration.
+      await window.agentIntegration.copyClientConfig()
+      toast('Configuración MCP copiada (incluye el token)', 'success')
     } catch {
       toast('No se pudo copiar la configuración', 'error')
     }
